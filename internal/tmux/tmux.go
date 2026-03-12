@@ -1,0 +1,357 @@
+package tmux
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+)
+
+const SessionName = "claudes"
+
+// Client wraps tmux CLI interactions.
+type Client struct{}
+
+// NewClient creates a new tmux client.
+func NewClient() *Client {
+	return &Client{}
+}
+
+// run executes a tmux command and returns trimmed stdout.
+func (c *Client) run(args ...string) (string, error) {
+	cmd := exec.Command("tmux", args...)
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+// InsideClaudesSession returns true if the current process is running
+// inside the "claudes" tmux session.
+func (c *Client) InsideClaudesSession() bool {
+	if os.Getenv("TMUX") == "" {
+		return false
+	}
+	out, err := c.run("display-message", "-p", "#{session_name}")
+	return err == nil && out == SessionName
+}
+
+// EnsureSession creates the claudes tmux session if it doesn't exist.
+// If dashboardCmd is non-empty, the dashboard window runs that command.
+// Returns true if a new session was created.
+func (c *Client) EnsureSession(dashboardCmd string) (bool, error) {
+	_, err := c.run("has-session", "-t", SessionName)
+	if err == nil {
+		return false, nil
+	}
+	args := []string{"new-session", "-d", "-s", SessionName, "-n", "dashboard"}
+	if dashboardCmd != "" {
+		args = append(args, dashboardCmd)
+	}
+	_, err = c.run(args...)
+	if err != nil {
+		return false, fmt.Errorf("create session: %w", err)
+	}
+	return true, nil
+}
+
+// RespawnDashboard kills whatever is running in the dashboard window
+// and starts the given command in its place.
+func (c *Client) RespawnDashboard(cmd string) error {
+	target := fmt.Sprintf("%s:dashboard", SessionName)
+	_, err := c.run("respawn-window", "-k", "-t", target, cmd)
+	if err != nil {
+		return fmt.Errorf("respawn-window: %w", err)
+	}
+	return nil
+}
+
+// Attach replaces the current process with tmux attach-session.
+// This never returns on success.
+func (c *Client) Attach() error {
+	tmuxBin, err := exec.LookPath("tmux")
+	if err != nil {
+		return fmt.Errorf("tmux not found: %w", err)
+	}
+	return execvp(tmuxBin, []string{"tmux", "attach-session", "-t", SessionName})
+}
+
+// SwitchClient switches the current tmux client to the claudes session.
+// Use when already inside a different tmux session.
+func (c *Client) SwitchClient() error {
+	_, err := c.run("switch-client", "-t", SessionName)
+	if err != nil {
+		return fmt.Errorf("switch-client: %w", err)
+	}
+	return nil
+}
+
+// WindowInfo holds parsed tmux window data.
+type WindowInfo struct {
+	ID          string // e.g. "@1"
+	Index       string // e.g. "1"
+	Name        string
+	Active      bool
+	PaneCommand string // pane_current_command ("claude", "zsh", etc.)
+	PanePath    string // pane_current_path (working directory)
+	PanePID     string // pane_pid
+}
+
+// ListWindows returns all windows in the claudes session.
+func (c *Client) ListWindows() ([]WindowInfo, error) {
+	out, err := c.run("list-windows", "-t", SessionName,
+		"-F", "#{window_id}\t#{window_index}\t#{window_name}\t#{window_active}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_pid}")
+	if err != nil {
+		return nil, fmt.Errorf("list-windows: %w", err)
+	}
+	if out == "" {
+		return nil, nil
+	}
+
+	var windows []WindowInfo
+	for _, line := range strings.Split(out, "\n") {
+		parts := strings.SplitN(line, "\t", 7)
+		if len(parts) < 7 {
+			continue
+		}
+		windows = append(windows, WindowInfo{
+			ID:          parts[0],
+			Index:       parts[1],
+			Name:        parts[2],
+			Active:      parts[3] == "1",
+			PaneCommand: parts[4],
+			PanePath:    parts[5],
+			PanePID:     parts[6],
+		})
+	}
+	return windows, nil
+}
+
+// WindowInfoMap returns a map of window name → WindowInfo for quick lookup.
+func (c *Client) WindowInfoMap() map[string]WindowInfo {
+	windows, err := c.ListWindows()
+	if err != nil {
+		return nil
+	}
+	m := make(map[string]WindowInfo, len(windows))
+	for _, w := range windows {
+		m[w.Name] = w
+	}
+	return m
+}
+
+// SetWindowOption sets a user-defined option on a tmux window.
+func (c *Client) SetWindowOption(windowID, key, value string) {
+	target := fmt.Sprintf("%s:%s", SessionName, windowID)
+	c.run("set-option", "-t", target, "@"+key, value)
+}
+
+// GetWindowOption reads a user-defined option from a tmux window.
+func (c *Client) GetWindowOption(windowID, key string) string {
+	target := fmt.Sprintf("%s:%s", SessionName, windowID)
+	out, err := c.run("show-options", "-wv", "-t", target, "@"+key)
+	if err != nil {
+		return ""
+	}
+	return out
+}
+
+// GetFullCommand returns the full command line for a process by PID.
+// Uses ps to retrieve the complete argv (needed to detect flags like --dangerously-skip-permissions).
+func (c *Client) GetFullCommand(pid string) string {
+	cmd := exec.Command("ps", "-p", pid, "-o", "args=")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// NewWindow creates a new window running the given command.
+// The -d flag keeps the current window (dashboard) focused.
+// KillWindowByName kills a window by name (best-effort). Used to clean up
+// stale windows before creating a replacement.
+func (c *Client) KillWindowByName(name string) {
+	target := fmt.Sprintf("%s:%s", SessionName, name)
+	c.run("kill-window", "-t", target)
+}
+
+func (c *Client) NewWindow(name, dir, shellCmd string) (string, error) {
+	// -a: insert after current window, auto-picking a free index
+	args := []string{"new-window", "-da", "-t", SessionName, "-n", name, "-P", "-F", "#{window_id}"}
+	if dir != "" {
+		args = append(args, "-c", dir)
+	}
+	if shellCmd != "" {
+		args = append(args, shellCmd)
+	}
+	id, err := c.run(args...)
+	if err != nil {
+		return "", fmt.Errorf("new-window %s: %s (%w)", name, id, err)
+	}
+	return id, nil
+}
+
+// CapturePane captures the visible content of a window's pane.
+func (c *Client) CapturePane(windowID string, lines int) (string, error) {
+	target := fmt.Sprintf("%s:%s", SessionName, windowID)
+	out, err := c.run("capture-pane", "-t", target, "-p",
+		"-S", fmt.Sprintf("-%d", lines))
+	if err != nil {
+		return "", fmt.Errorf("capture-pane: %w", err)
+	}
+	return out, nil
+}
+
+// KillWindow destroys a window by ID. No-op if windowID is empty.
+func (c *Client) KillWindow(windowID string) error {
+	if windowID == "" {
+		return nil
+	}
+	target := fmt.Sprintf("%s:%s", SessionName, windowID)
+	_, err := c.run("kill-window", "-t", target)
+	if err != nil {
+		return fmt.Errorf("kill-window: %w", err)
+	}
+	return nil
+}
+
+// SendKeys sends keystrokes to a window's pane.
+func (c *Client) SendKeys(windowID string, keys ...string) error {
+	target := fmt.Sprintf("%s:%s", SessionName, windowID)
+	args := append([]string{"send-keys", "-t", target}, keys...)
+	_, err := c.run(args...)
+	if err != nil {
+		return fmt.Errorf("send-keys: %w", err)
+	}
+	return nil
+}
+
+// SelectWindow switches the active window in the session. No-op if windowID is empty.
+func (c *Client) SelectWindow(windowID string) error {
+	if windowID == "" {
+		return nil
+	}
+	target := fmt.Sprintf("%s:%s", SessionName, windowID)
+	_, err := c.run("select-window", "-t", target)
+	if err != nil {
+		return fmt.Errorf("select-window: %w", err)
+	}
+	return nil
+}
+
+// SetupKeybindings registers claudes-specific tmux keybindings in the session.
+// Ctrl-Space (root table, no prefix needed) jumps back to the dashboard.
+// Ctrl-Left/Right cycle through windows.
+func (c *Client) SetupKeybindings() {
+	dashTarget := fmt.Sprintf("%s:dashboard", SessionName)
+	c.run("bind-key", "-T", "root", "C-Space", "select-window", "-t", dashTarget)
+	c.run("bind-key", "-T", "root", "C-Left", "previous-window")
+	c.run("bind-key", "-T", "root", "C-Right", "next-window")
+	// Pane navigation (vim-style)
+	c.run("bind-key", "-T", "root", "C-h", "select-pane", "-L")
+	c.run("bind-key", "-T", "root", "C-j", "select-pane", "-D")
+	c.run("bind-key", "-T", "root", "C-k", "select-pane", "-U")
+	c.run("bind-key", "-T", "root", "C-l", "select-pane", "-R")
+}
+
+// CleanupKeybindings removes claudes-specific tmux keybindings.
+func (c *Client) CleanupKeybindings() {
+	c.run("unbind-key", "-T", "root", "C-Space")
+	c.run("unbind-key", "-T", "root", "C-Left")
+	c.run("unbind-key", "-T", "root", "C-Right")
+	c.run("unbind-key", "-T", "root", "C-h")
+	c.run("unbind-key", "-T", "root", "C-j")
+	c.run("unbind-key", "-T", "root", "C-k")
+	c.run("unbind-key", "-T", "root", "C-l")
+}
+
+// DetachClient detaches the current tmux client, returning the user
+// to their terminal (if they attached) or previous session (if they switched).
+func (c *Client) DetachClient() error {
+	_, err := c.run("detach-client")
+	if err != nil {
+		return fmt.Errorf("detach-client: %w", err)
+	}
+	return nil
+}
+
+// KeepDashboardAlive sets remain-on-exit on the dashboard window so the
+// pane persists after the TUI process exits. This prevents the session
+// from being destroyed when instances are still running.
+func (c *Client) KeepDashboardAlive() {
+	target := fmt.Sprintf("%s:dashboard", SessionName)
+	c.run("set-option", "-t", target, "remain-on-exit", "on")
+}
+
+// HasSession checks if the claudes session exists.
+func (c *Client) HasSession() bool {
+	_, err := c.run("has-session", "-t", SessionName)
+	return err == nil
+}
+
+// RenameWindow renames a window.
+func (c *Client) RenameWindow(windowID, name string) error {
+	target := fmt.Sprintf("%s:%s", SessionName, windowID)
+	_, err := c.run("rename-window", "-t", target, name)
+	if err != nil {
+		return fmt.Errorf("rename-window: %w", err)
+	}
+	return nil
+}
+
+// PaneInfo holds parsed tmux pane data.
+type PaneInfo struct {
+	PaneID string // e.g. "%5"
+	PID    string // pane_pid
+}
+
+// JoinPane moves a pane from srcWindowID into dstWindowID (destroys src window).
+func (c *Client) JoinPane(srcWindowID, dstWindowID string) error {
+	src := fmt.Sprintf("%s:%s", SessionName, srcWindowID)
+	dst := fmt.Sprintf("%s:%s", SessionName, dstWindowID)
+	_, err := c.run("join-pane", "-s", src, "-t", dst)
+	if err != nil {
+		return fmt.Errorf("join-pane: %w", err)
+	}
+	return nil
+}
+
+// BreakPane breaks a pane out of its window into a new standalone window.
+// Returns the new window ID.
+func (c *Client) BreakPane(paneID, windowName string) (string, error) {
+	id, err := c.run("break-pane", "-d", "-s", paneID, "-n", windowName, "-P", "-F", "#{window_id}")
+	if err != nil {
+		return "", fmt.Errorf("break-pane: %w", err)
+	}
+	return id, nil
+}
+
+// SelectLayoutTiled applies the "tiled" layout to a window.
+func (c *Client) SelectLayoutTiled(windowID string) error {
+	target := fmt.Sprintf("%s:%s", SessionName, windowID)
+	_, err := c.run("select-layout", "-t", target, "tiled")
+	if err != nil {
+		return fmt.Errorf("select-layout: %w", err)
+	}
+	return nil
+}
+
+// ListPanes returns all panes in a window.
+func (c *Client) ListPanes(windowID string) ([]PaneInfo, error) {
+	target := fmt.Sprintf("%s:%s", SessionName, windowID)
+	out, err := c.run("list-panes", "-t", target, "-F", "#{pane_id}\t#{pane_pid}")
+	if err != nil {
+		return nil, fmt.Errorf("list-panes: %w", err)
+	}
+	if out == "" {
+		return nil, nil
+	}
+	var panes []PaneInfo
+	for _, line := range strings.Split(out, "\n") {
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		panes = append(panes, PaneInfo{PaneID: parts[0], PID: parts[1]})
+	}
+	return panes, nil
+}
