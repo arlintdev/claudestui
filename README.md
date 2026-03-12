@@ -37,20 +37,20 @@ Download the latest binary from [Releases](https://github.com/arlintdev/claudest
 
 ```bash
 # macOS (Apple Silicon)
-curl -L https://github.com/arlintdev/claudestui/releases/latest/download/panes-darwin-arm64 -o panes
-chmod +x panes && sudo mv panes /usr/local/bin/
+curl -L https://github.com/arlintdev/claudestui/releases/latest/download/claudes-darwin-arm64 -o claudes
+chmod +x claudes && sudo mv claudes /usr/local/bin/
 
 # macOS (Intel)
-curl -L https://github.com/arlintdev/claudestui/releases/latest/download/panes-darwin-amd64 -o panes
-chmod +x panes && sudo mv panes /usr/local/bin/
+curl -L https://github.com/arlintdev/claudestui/releases/latest/download/claudes-darwin-amd64 -o claudes
+chmod +x claudes && sudo mv claudes /usr/local/bin/
 
 # Linux (amd64)
-curl -L https://github.com/arlintdev/claudestui/releases/latest/download/panes-linux-amd64 -o panes
-chmod +x panes && sudo mv panes /usr/local/bin/
+curl -L https://github.com/arlintdev/claudestui/releases/latest/download/claudes-linux-amd64 -o claudes
+chmod +x claudes && sudo mv claudes /usr/local/bin/
 
 # Linux (arm64)
-curl -L https://github.com/arlintdev/claudestui/releases/latest/download/panes-linux-arm64 -o panes
-chmod +x panes && sudo mv panes /usr/local/bin/
+curl -L https://github.com/arlintdev/claudestui/releases/latest/download/claudes-linux-arm64 -o claudes
+chmod +x claudes && sudo mv claudes /usr/local/bin/
 ```
 
 ### From source
@@ -62,7 +62,7 @@ go install github.com/arlintdev/claudes@latest
 ## Usage
 
 ```bash
-panes
+claudes
 ```
 
 On first run, the app creates a dedicated tmux session called `claudes` and drops you into the dashboard. If the session already exists, it reattaches.
@@ -196,7 +196,7 @@ The app also reads Claude's session data from `~/.claude/projects/` for activity
 ```bash
 git clone https://github.com/arlintdev/claudestui.git
 cd claudestui
-go build -o panes .
+go build -o claudes .
 ```
 
 ## License
