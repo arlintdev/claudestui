@@ -3,7 +3,7 @@
 A tmux-based terminal dashboard for managing multiple [Claude Code](https://docs.anthropic.com/en/docs/claude-code) instances. Launch, monitor, group, and switch between Claude sessions from a single pane of glass.
 
 ```
- Instances: 4 (2 running, 1 idle, 1 error)     ╔═╗╦  ╔═╗╦ ╦╔╦╗╔═╗╔═╗
+ Instances: 4 (2 running, 1 idle, 1 error)       ╔═╗╦  ╔═╗╦ ╦╔╦╗╔═╗╔═╗
  CPU:       23%                                  ║  ║  ╠═╣║ ║ ║║║╣ ╚═╗
  MEM:       8.2G/16.0G                           ╚═╝╩═╝╩ ╩╚═╝═╩╝╚═╝╚═╝
                                                      » made by ARLINTDEV
