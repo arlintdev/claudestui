@@ -3,10 +3,20 @@
 A tmux-based terminal dashboard for managing multiple [Claude Code](https://docs.anthropic.com/en/docs/claude-code) instances. Launch, monitor, group, and switch between Claude sessions from a single pane of glass.
 
 ```
- Instances: 4 (2 running, 1 idle, 1 error)       ╔═╗╦  ╔═╗╦ ╦╔╦╗╔═╗╔═╗
- CPU:       23%                                  ║  ║  ╠═╣║ ║ ║║║╣ ╚═╗
- MEM:       8.2G/16.0G                           ╚═╝╩═╝╩ ╩╚═╝═╩╝╚═╝╚═╝
-                                                     » made by ARLINTDEV
+ Instances: 5 (2 running, 2 idle, 1 error)                    ╔═╗╦  ╔═╗╦ ╦╔╦╗╔═╗╔═╗
+ CPU:       23%                                                ║  ║  ╠═╣║ ║ ║║║╣ ╚═╗
+ MEM:       8.2G/16.0G                                         ╚═╝╩═╝╩ ╩╚═╝═╩╝╚═╝╚═╝
+                                                                   » made by ARLINTDEV
+ <n> New  <d> Danger  <^s> Stop  <^x> Stop Idle  <^d> Delete  <Enter> Attach  <^r> Resume
+ <Space> Select  <^a> All  <^g> Group  <^b> Ungroup  </> Filter  <L> Profile  <?> Help
+───────────────────────── Instances(all)[5] ──────────────────────────
+ NAME           STATUS     MODE     DIR              ACTIVITY              CPU     MEM AGE
+ backend        ● running  safe     …jects/api       Wrote src/handler.go   12%   340M  23m
+ frontend       ● running  safe     …jects/web       Reading package.json   11%   280M  23m
+ ── my-project ──────────────────────────────────────────────────────────────────────────
+ tests          ○ idle     danger   …jects/api       Ran test suite          0%   120M  18m
+ docs           ○ idle     safe     …jects/docs      Updated README.md       0%    95M  10m
+ migration      ✗ error    safe     …jects/db        -                       -       -   5m
 ```
 
 ## Features
