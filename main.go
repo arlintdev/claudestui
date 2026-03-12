@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 
 	"github.com/arlintdev/claudes/internal/claude"
 	"github.com/arlintdev/claudes/internal/config"
@@ -14,6 +16,8 @@ import (
 )
 
 func main() {
+	checkPrereqs()
+
 	cfg := config.Load()
 	_ = config.EnsureDir()
 
@@ -86,5 +90,45 @@ func runTUI(cfg config.Config, tc *tmux.Client) {
 
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "Error: "+format+"\n", args...)
+	os.Exit(1)
+}
+
+// prereq defines a required external dependency.
+type prereq struct {
+	bin     string // binary name to look up in PATH
+	name    string // human-friendly name
+	install string // install hint
+}
+
+func checkPrereqs() {
+	reqs := []prereq{
+		{"tmux", "tmux", ""},
+		{"claude", "Claude Code CLI", "npm install -g @anthropic-ai/claude-code"},
+	}
+
+	// Platform-specific install hint for tmux
+	switch runtime.GOOS {
+	case "darwin":
+		reqs[0].install = "brew install tmux"
+	default:
+		reqs[0].install = "apt install tmux  (or your package manager)"
+	}
+
+	var missing []prereq
+	for _, r := range reqs {
+		if _, err := exec.LookPath(r.bin); err != nil {
+			missing = append(missing, r)
+		}
+	}
+
+	if len(missing) == 0 {
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, "Missing required dependencies:\n")
+	for _, m := range missing {
+		fmt.Fprintf(os.Stderr, "  ✗ %s\n", m.name)
+		fmt.Fprintf(os.Stderr, "    Install: %s\n\n", m.install)
+	}
 	os.Exit(1)
 }
