@@ -217,7 +217,7 @@ func (l *ListView) View() string {
 	colMode := 8
 	colCPU := 5
 	colMem := 7
-	colUp := 6
+	colUp := 8
 	fixedCols := checkW + colName + colStatus + colMode + colCPU + colMem + colUp + 7 // 7 for spacing
 	remaining := l.width - fixedCols
 	colDir := max(remaining*30/100, 12)
