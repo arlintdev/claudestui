@@ -82,6 +82,7 @@ func (l *Launcher) Launch(opts LaunchOpts) (*instance.Instance, error) {
 	}
 	l.tmux.SetWindowOption(windowID, "claudes-mode", mode.String())
 	l.tmux.SetRemainOnExit(windowID)
+	l.tmux.SetPaneTitle(windowID, opts.Name)
 	l.manager.Add(inst)
 	if l.Activity != nil {
 		l.Activity.Watch(inst.ID, inst.Dir, "")
@@ -141,8 +142,7 @@ func (l *Launcher) Resume(id string) error {
 		Dir:       inst.Dir,
 		Model:     inst.Model,
 		Dangerous: inst.Mode == instance.ModeDanger,
-		SessionID: inst.SessionID,
-		Resume:    inst.SessionID == "", // plain --resume only if no specific session
+		Resume:    true, // always use plain --resume so the user can pick the session
 	}
 	cmd := BuildCommand(opts)
 	windowID, err := l.tmux.NewWindow(inst.ID, opts.Dir, cmd)
@@ -155,6 +155,7 @@ func (l *Launcher) Resume(id string) error {
 	inst.StartedAt = time.Now()
 	l.tmux.SetWindowOption(windowID, "claudes-mode", inst.Mode.String())
 	l.tmux.SetRemainOnExit(windowID)
+	l.tmux.SetPaneTitle(windowID, inst.Name)
 	if l.Activity != nil {
 		l.Activity.Watch(inst.ID, inst.Dir, inst.SessionID)
 	}
@@ -190,6 +191,7 @@ func (l *Launcher) ResumeSession(id, sessionID string) error {
 	inst.StartedAt = time.Now()
 	l.tmux.SetWindowOption(windowID, "claudes-mode", inst.Mode.String())
 	l.tmux.SetRemainOnExit(windowID)
+	l.tmux.SetPaneTitle(windowID, inst.Name)
 	if l.Activity != nil {
 		l.Activity.Watch(inst.ID, inst.Dir, sessionID)
 	}
@@ -271,22 +273,15 @@ func (l *Launcher) ToggleDangerous(id string) error {
 		newMode = instance.ModeSafe
 	}
 
-	// Find active session ID for resume
-	sessionID := ActiveSessionID(inst.Dir)
-	if sessionID == "" && inst.SessionID != "" {
-		sessionID = inst.SessionID
-	}
-
 	// Kill old window
 	_ = l.tmux.KillWindow(inst.WindowID)
 
-	// Relaunch with new mode
+	// Relaunch with new mode — use plain --resume so the user can pick the session
 	opts := LaunchOpts{
 		Name:      inst.Name,
 		Dir:       inst.Dir,
 		Dangerous: newMode == instance.ModeDanger,
-		SessionID: sessionID,
-		Resume:    sessionID == "", // plain --resume if no specific session
+		Resume:    true,
 	}
 	cmd := BuildCommand(opts)
 	windowID, err := l.tmux.NewWindow(inst.ID, opts.Dir, cmd)
@@ -297,13 +292,14 @@ func (l *Launcher) ToggleDangerous(id string) error {
 
 	inst.WindowID = windowID
 	inst.Mode = newMode
-	inst.SessionID = sessionID
+	inst.SessionID = ""
 	inst.Status = instance.StatusRunning
 	inst.StartedAt = time.Now()
 	l.tmux.SetWindowOption(windowID, "claudes-mode", newMode.String())
 	l.tmux.SetRemainOnExit(windowID)
+	l.tmux.SetPaneTitle(windowID, inst.Name)
 	if l.Activity != nil {
-		l.Activity.Watch(inst.ID, inst.Dir, sessionID)
+		l.Activity.Watch(inst.ID, inst.Dir, "")
 	}
 	l.manager.SaveInstance(id)
 	return nil

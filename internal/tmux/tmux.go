@@ -152,12 +152,19 @@ func (c *Client) SetWindowOption(windowID, key, value string) {
 	c.run("set-option", "-t", target, "@"+key, value)
 }
 
+// SetPaneTitle sets the pane title for a window (used in the status bar).
+func (c *Client) SetPaneTitle(windowID, title string) {
+	target := fmt.Sprintf("%s:%s", SessionName, windowID)
+	c.run("select-pane", "-t", target, "-T", title)
+}
+
 // SetRemainOnExit enables remain-on-exit for a window so the pane stays
 // visible (as dead) when its process exits, rather than vanishing instantly.
 func (c *Client) SetRemainOnExit(windowID string) {
 	target := fmt.Sprintf("%s:%s", SessionName, windowID)
 	c.run("set-option", "-t", target, "remain-on-exit", "on")
 }
+
 
 // GetWindowOption reads a user-defined option from a tmux window.
 func (c *Client) GetWindowOption(windowID, key string) string {
@@ -259,24 +266,34 @@ func (c *Client) SelectWindow(windowID string) error {
 func (c *Client) SetupKeybindings() {
 	dashTarget := fmt.Sprintf("%s:%s", SessionName, DashboardWindowName)
 	c.run("bind-key", "-T", "root", "C-Space", "select-window", "-t", dashTarget)
-	c.run("bind-key", "-T", "root", "C-Left", "previous-window")
-	c.run("bind-key", "-T", "root", "C-Right", "next-window")
-	// Pane navigation (vim-style)
-	c.run("bind-key", "-T", "root", "C-h", "select-pane", "-L")
+	// Vim-style window switching
+	c.run("bind-key", "-T", "root", "C-h", "previous-window")
+	c.run("bind-key", "-T", "root", "C-l", "next-window")
+	// Pane navigation for tiled views
 	c.run("bind-key", "-T", "root", "C-j", "select-pane", "-D")
 	c.run("bind-key", "-T", "root", "C-k", "select-pane", "-U")
-	c.run("bind-key", "-T", "root", "C-l", "select-pane", "-R")
+
+	// Ensure mouse mode is off so terminal-native text selection/copy works.
+	c.run("set-option", "-t", SessionName, "mouse", "off")
+	// Prevent apps (like Claude Code) from overwriting pane/window titles via escape sequences.
+	c.run("set-option", "-t", SessionName, "allow-rename", "off")
+
+	// Show navigation hint + instance name in the tmux status bar
+	c.run("set-option", "-t", SessionName, "status", "on")
+	c.run("set-option", "-t", SessionName, "status-style", "bg=default,fg=colour8")
+	c.run("set-option", "-t", SessionName, "status-left", "")
+	c.run("set-option", "-t", SessionName, "status-right",
+		" #{pane_title}  │  ^Space dashboard  ^h/^l windows ")
+	c.run("set-option", "-t", SessionName, "status-right-length", "80")
 }
 
 // CleanupKeybindings removes claudes-specific tmux keybindings.
 func (c *Client) CleanupKeybindings() {
 	c.run("unbind-key", "-T", "root", "C-Space")
-	c.run("unbind-key", "-T", "root", "C-Left")
-	c.run("unbind-key", "-T", "root", "C-Right")
 	c.run("unbind-key", "-T", "root", "C-h")
+	c.run("unbind-key", "-T", "root", "C-l")
 	c.run("unbind-key", "-T", "root", "C-j")
 	c.run("unbind-key", "-T", "root", "C-k")
-	c.run("unbind-key", "-T", "root", "C-l")
 }
 
 // DetachClient detaches the current tmux client, returning the user

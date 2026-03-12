@@ -6,7 +6,7 @@ A tmux-based terminal dashboard for managing multiple [Claude Code](https://docs
  Instances: 5 (2 running, 2 idle, 1 error)                     ╔═╗╦  ╔═╗╦ ╦╔╦╗╔═╗╔═╗
  CPU:       23%                                                ║  ║  ╠═╣║ ║ ║║║╣ ╚═╗
  MEM:       8.2G/16.0G                                         ╚═╝╩═╝╩ ╩╚═╝═╩╝╚═╝╚═╝
-                                                                   » made by ARLINTDEV
+                                                                  ~/made/by/arlint.dev
  <n> New  <d> Danger  <^s> Stop  <^x> Stop Idle  <^d> Delete  <Enter> Attach  <^r> Resume
  <Space> Select  <^a> All  <^g> Group  <^b> Ungroup  </> Filter  <L> Profile  <?> Help
 ───────────────────────── Instances(all)[5] ──────────────────────────
@@ -84,6 +84,12 @@ On first run, the app creates a dedicated tmux session called `claudes` and drop
 3. **Navigation** — Switch between the dashboard and instances using keybindings
 4. **Persistence** — Instance state is stored in `~/.config/claudes/claudes.db`
 
+## Important: Returning to the Dashboard
+
+When you're inside a Claude instance, press **`Ctrl+Space`** to return to the dashboard without closing the instance. This is the most important keybinding to remember — your Claude session keeps running in the background.
+
+> The tmux status bar shows the instance name and navigation hints: `instance-name │ ^Space dashboard ^h/^l windows`
+
 ## Keybindings
 
 ### Dashboard
@@ -92,7 +98,8 @@ On first run, the app creates a dedicated tmux session called `claudes` and drop
 |---|---|
 | `j` / `k` / `↑` / `↓` | Navigate instance list |
 | `n` | New instance |
-| `Enter` | Attach to instance (tiled if grouped) |
+| `Enter` | Attach to instance |
+| `t` | Open tiled view of group/selection |
 | `Ctrl+Enter` | Open context menu |
 | `d` | Toggle dangerous mode |
 | `Ctrl+s` | Stop instance(s) |
@@ -113,8 +120,8 @@ On first run, the app creates a dedicated tmux session called `claudes` and drop
 | Key | Action |
 |---|---|
 | `Ctrl+Space` | Return to dashboard |
-| `Ctrl+←` / `Ctrl+→` | Previous / next window |
-| `Ctrl+h/j/k/l` | Navigate panes (in tiled view) |
+| `Ctrl+h` / `Ctrl+l` | Previous / next instance |
+| `Ctrl+j` / `Ctrl+k` | Navigate panes (in tiled view) |
 
 ### Mouse
 
@@ -185,11 +192,13 @@ Press `L` in the dashboard to browse and load profiles.
 ## Grouping & Tiled Views
 
 1. Select multiple instances with `Space` or `Ctrl+a`
-2. Press `Ctrl+g` to group them
-3. Press `Enter` on any group member to open a tiled tmux view
+2. Press `Ctrl+g` to group them (prompts for a group name)
+3. Press `t` on any group member to open a tiled tmux view
 4. Navigate between panes with `Ctrl+h/j/k/l`
 5. Press `Ctrl+Space` to return to the dashboard
 6. Press `Ctrl+b` to ungroup / break the tiled view
+
+> **Note:** `Enter` always attaches to the single selected instance, even if it's in a group. Use `t` to open the full tiled group view.
 
 ## Data Storage
 

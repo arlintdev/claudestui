@@ -47,9 +47,10 @@ type Dialog struct {
 	width     int
 	height    int
 
-	// New instance: model selector + danger toggle
+	// New instance: model selector + toggles
 	modelCur  int  // index into modelChoices
 	dangerous bool // start in dangerous mode
+	resume    bool // open with --resume (session picker)
 
 	// New instance: directory completions
 	dirCompletions []string
@@ -97,7 +98,7 @@ func NewDialog(theme Theme) Dialog {
 }
 
 // totalFields is the number of focusable fields in the new-instance form.
-const totalFields = 5 // name, dir, task, model, danger
+const totalFields = 6 // name, dir, task, model, danger, resume
 
 // OpenNew opens the new instance side panel.
 func (d *Dialog) OpenNew() {
@@ -105,6 +106,7 @@ func (d *Dialog) OpenNew() {
 	d.focus = 0
 	d.modelCur = 0
 	d.dangerous = false
+	d.resume = false
 	d.dirCompletions = nil
 	d.dirCompIdx = -1
 	d.inputs = make([]textinput.Model, 3)
@@ -248,11 +250,11 @@ func (d *Dialog) Target() string {
 }
 
 // NewInstanceValues returns values from the new dialog inputs.
-func (d *Dialog) NewInstanceValues() (name, dir, task, model string, dangerous bool) {
+func (d *Dialog) NewInstanceValues() (name, dir, task, model string, dangerous, resume bool) {
 	if len(d.inputs) < 3 {
 		return
 	}
-	return d.inputs[0].Value(), d.inputs[1].Value(), d.inputs[2].Value(), modelChoices[d.modelCur], d.dangerous
+	return d.inputs[0].Value(), d.inputs[1].Value(), d.inputs[2].Value(), modelChoices[d.modelCur], d.dangerous, d.resume
 }
 
 // FilterValue returns the current filter text.
@@ -325,6 +327,14 @@ func (d *Dialog) updateNew(msg tea.Msg) tea.Cmd {
 		if d.focus == 4 {
 			if msg.String() == " " {
 				d.dangerous = !d.dangerous
+			}
+			return nil
+		}
+
+		// Resume toggle: space to toggle
+		if d.focus == 5 {
+			if msg.String() == " " {
+				d.resume = !d.resume
 			}
 			return nil
 		}
@@ -613,12 +623,25 @@ func (d *Dialog) viewNew() string {
 	}
 	rows = append(rows, "")
 
+	// Resume toggle
+	resumeLabel := d.theme.Label.Render("Resume")
+	if d.focus == 5 {
+		resumeLabel = d.theme.Bold.Render("Resume")
+	}
+	rows = append(rows, resumeLabel)
+	if d.resume {
+		rows = append(rows, d.theme.Bold.Render("[x] resume previous session"))
+	} else {
+		rows = append(rows, d.theme.Muted.Render("[ ] new session"))
+	}
+	rows = append(rows, "")
+
 	// Hints
 	hint := d.theme.Muted.Render("Tab next  Enter create  Esc cancel")
 	switch d.focus {
 	case 3:
 		hint = d.theme.Muted.Render("←/→ select  Tab next  Enter create")
-	case 4:
+	case 4, 5:
 		hint = d.theme.Muted.Render("Space toggle  Tab next  Enter create")
 	}
 	rows = append(rows, hint)

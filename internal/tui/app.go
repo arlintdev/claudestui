@@ -75,7 +75,7 @@ func New(cfg config.Config, mgr *instance.Manager, tc *tmux.Client, launcher *cl
 var shortcutLabels = []struct{ key, desc string }{
 	{"n", "New"}, {"d", "Danger"}, {"^s", "Stop"}, {"^x", "Stop Idle"}, {"^d", "Delete"},
 	{"Enter", "Attach"}, {"^r", "Resume"}, {"Space", "Select"}, {"^a", "All"},
-	{"^g", "Group"}, {"^b", "Ungroup"}, {"t", "Tile"}, {"/", "Filter"}, {"L", "Profile"}, {"^hjkl", "Panes"}, {"^Space", "Back"}, {"?", "Help"}, {"q", "Quit"},
+	{"^g", "Group"}, {"^b", "Ungroup"}, {"t", "Tile"}, {"/", "Filter"}, {"L", "Profile"}, {"^h/l", "Prev/Next"}, {"^j/k", "Panes"}, {"^Space", "Back"}, {"?", "Help"}, {"q", "Quit"},
 }
 
 // calcShortcutRows computes how many lines the shortcut bar needs at current width.
@@ -409,7 +409,7 @@ func (m Model) handleDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.dialog.AcceptCompletion(m.dialog.dirCompIdx)
 				return m, nil
 			}
-			name, dir, task, model, dangerous := m.dialog.NewInstanceValues()
+			name, dir, task, model, dangerous, resume := m.dialog.NewInstanceValues()
 			if name == "" {
 				return m, nil
 			}
@@ -426,6 +426,7 @@ func (m Model) handleDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				Task:      task,
 				Model:     model,
 				Dangerous: dangerous,
+				Resume:    resume,
 			})
 			if err != nil {
 				m.err = err
