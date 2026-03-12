@@ -812,7 +812,7 @@ var logoArt = []string{
 	`║  ║  ╠═╣║ ║ ║║║╣ ╚═╗`,
 	`╚═╝╩═╝╩ ╩╚═╝═╩╝╚═╝╚═╝`,
 }
-var logoTagline = `» made by ARLINTDEV`
+var logoTagline = `~/made/by/arlint.dev`
 
 // renderHeader renders the compact header: logo + stats (3 lines) + shortcut bar (1 line).
 func (m Model) renderHeader() string {
