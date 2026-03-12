@@ -39,36 +39,108 @@ func Open() (*Store, error) {
 		return nil, err
 	}
 
-	// Create the instances table.
-	const ddl = `CREATE TABLE IF NOT EXISTS instances (
-		name       TEXT PRIMARY KEY,
-		dir        TEXT NOT NULL,
-		task       TEXT NOT NULL DEFAULT '',
-		mode       TEXT NOT NULL DEFAULT 'safe',
-		model      TEXT NOT NULL DEFAULT '',
-		window_id  TEXT NOT NULL DEFAULT '',
-		session_id TEXT NOT NULL DEFAULT '',
-		started_at TEXT NOT NULL DEFAULT '',
-		created_at TEXT NOT NULL DEFAULT (datetime('now'))
-	)`
-	if _, err := db.Exec(ddl); err != nil {
+	s := &Store{db: db}
+	if err := s.ensureSchema(); err != nil {
 		db.Close()
 		return nil, err
 	}
 
-	// Migration: add model column if missing (upgrade from older schema).
-	s := &Store{db: db}
-	s.migrate()
-
 	return s, nil
 }
 
-// migrate adds columns that may be missing from older schemas.
-func (s *Store) migrate() {
-	// model column added after initial release
+// ensureSchema creates or migrates the instances table.
+func (s *Store) ensureSchema() error {
+	// Check if the table exists at all.
+	var count int
+	err := s.db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='instances'").Scan(&count)
+	if err != nil {
+		return err
+	}
+
+	if count == 0 {
+		// Fresh install — create table with id as primary key.
+		const ddl = `CREATE TABLE instances (
+			id         TEXT PRIMARY KEY,
+			name       TEXT NOT NULL,
+			dir        TEXT NOT NULL,
+			task       TEXT NOT NULL DEFAULT '',
+			mode       TEXT NOT NULL DEFAULT 'safe',
+			model      TEXT NOT NULL DEFAULT '',
+			group_name TEXT NOT NULL DEFAULT '',
+			window_id  TEXT NOT NULL DEFAULT '',
+			session_id TEXT NOT NULL DEFAULT '',
+			started_at TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)`
+		_, err := s.db.Exec(ddl)
+		return err
+	}
+
+	// Table exists — check if it has the id column.
+	hasID := false
+	rows, err := s.db.Query("PRAGMA table_info(instances)")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull int
+		var dfltValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
+			return err
+		}
+		if name == "id" {
+			hasID = true
+		}
+	}
+
+	if hasID {
+		return nil // already migrated
+	}
+
+	// Migrate: old schema has name as PK, no id column.
+	// Recreate the table with id as PK, generating IDs for existing rows.
+	_, err = s.db.Exec(`
+		CREATE TABLE instances_new (
+			id         TEXT PRIMARY KEY,
+			name       TEXT NOT NULL,
+			dir        TEXT NOT NULL,
+			task       TEXT NOT NULL DEFAULT '',
+			mode       TEXT NOT NULL DEFAULT 'safe',
+			model      TEXT NOT NULL DEFAULT '',
+			group_name TEXT NOT NULL DEFAULT '',
+			window_id  TEXT NOT NULL DEFAULT '',
+			session_id TEXT NOT NULL DEFAULT '',
+			started_at TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)`)
+	if err != nil {
+		return err
+	}
+
+	// Copy data, generating random hex IDs for each row.
+	// Also handle older schemas that may lack model or group_name columns.
 	_, _ = s.db.Exec("ALTER TABLE instances ADD COLUMN model TEXT NOT NULL DEFAULT ''")
-	// group_name column for persistent instance groups
 	_, _ = s.db.Exec("ALTER TABLE instances ADD COLUMN group_name TEXT NOT NULL DEFAULT ''")
+
+	_, err = s.db.Exec(`
+		INSERT INTO instances_new (id, name, dir, task, mode, model, group_name, window_id, session_id, started_at, created_at)
+		SELECT lower(hex(randomblob(4))), name, dir, task, mode, model, group_name, window_id, session_id, started_at, created_at
+		FROM instances`)
+	if err != nil {
+		s.db.Exec("DROP TABLE instances_new")
+		return err
+	}
+
+	_, err = s.db.Exec("DROP TABLE instances")
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec("ALTER TABLE instances_new RENAME TO instances")
+	return err
 }
 
 // Close closes the database connection.
@@ -77,17 +149,17 @@ func (s *Store) Close() error {
 }
 
 // Save persists an instance row (INSERT OR REPLACE).
-func (s *Store) Save(name, dir, task, mode, model, groupName, windowID, sessionID, startedAt string) error {
+func (s *Store) Save(id, name, dir, task, mode, model, groupName, windowID, sessionID, startedAt string) error {
 	const q = `INSERT OR REPLACE INTO instances
-		(name, dir, task, mode, model, group_name, window_id, session_id, started_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := s.db.Exec(q, name, dir, task, mode, model, groupName, windowID, sessionID, startedAt)
+		(id, name, dir, task, mode, model, group_name, window_id, session_id, started_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := s.db.Exec(q, id, name, dir, task, mode, model, groupName, windowID, sessionID, startedAt)
 	return err
 }
 
 // All returns all persisted instance rows.
 func (s *Store) All() ([]instance.StoreRow, error) {
-	const q = `SELECT name, dir, task, mode, model, group_name, window_id, session_id, started_at FROM instances`
+	const q = `SELECT id, name, dir, task, mode, model, group_name, window_id, session_id, started_at FROM instances`
 	rows, err := s.db.Query(q)
 	if err != nil {
 		return nil, err
@@ -97,7 +169,7 @@ func (s *Store) All() ([]instance.StoreRow, error) {
 	var out []instance.StoreRow
 	for rows.Next() {
 		var r instance.StoreRow
-		if err := rows.Scan(&r.Name, &r.Dir, &r.Task, &r.Mode, &r.Model, &r.GroupName, &r.WindowID, &r.SessionID, &r.StartedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.Dir, &r.Task, &r.Mode, &r.Model, &r.GroupName, &r.WindowID, &r.SessionID, &r.StartedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -105,8 +177,8 @@ func (s *Store) All() ([]instance.StoreRow, error) {
 	return out, rows.Err()
 }
 
-// Delete permanently removes an instance row by name.
-func (s *Store) Delete(name string) error {
-	_, err := s.db.Exec("DELETE FROM instances WHERE name = ?", name)
+// Delete permanently removes an instance row by ID.
+func (s *Store) Delete(id string) error {
+	_, err := s.db.Exec("DELETE FROM instances WHERE id = ?", id)
 	return err
 }

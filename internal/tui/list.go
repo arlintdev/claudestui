@@ -17,8 +17,8 @@ type ListView struct {
 	height    int
 	theme     Theme
 	filter    string
-	activity  map[string]string // name → last activity line
-	selected  map[string]bool   // multi-select set (name → true)
+	activity  map[string]string // id → last activity line
+	selected  map[string]bool   // multi-select set (id → true)
 }
 
 // NewListView creates a new list view.
@@ -26,9 +26,9 @@ func NewListView(theme Theme) ListView {
 	return ListView{theme: theme, activity: make(map[string]string), selected: make(map[string]bool)}
 }
 
-// SetActivity stores the last activity line for an instance.
-func (l *ListView) SetActivity(name, line string) {
-	l.activity[name] = line
+// SetActivity stores the last activity line for an instance (keyed by ID).
+func (l *ListView) SetActivity(id, line string) {
+	l.activity[id] = line
 }
 
 // SetSize updates the available dimensions.
@@ -75,11 +75,11 @@ func (l *ListView) Sync(instances []*instance.Instance) {
 	// Clean stale selections for removed instances
 	visible := make(map[string]bool, len(l.instances))
 	for _, inst := range l.instances {
-		visible[inst.Name] = true
+		visible[inst.ID] = true
 	}
-	for name := range l.selected {
-		if !visible[name] {
-			delete(l.selected, name)
+	for id := range l.selected {
+		if !visible[id] {
+			delete(l.selected, id)
 		}
 	}
 }
@@ -109,10 +109,10 @@ func (l *ListView) Selected() *instance.Instance {
 // ToggleSelected toggles the item at the cursor in the multi-select set.
 func (l *ListView) ToggleSelected() {
 	if sel := l.Selected(); sel != nil {
-		if l.selected[sel.Name] {
-			delete(l.selected, sel.Name)
+		if l.selected[sel.ID] {
+			delete(l.selected, sel.ID)
 		} else {
-			l.selected[sel.Name] = true
+			l.selected[sel.ID] = true
 		}
 	}
 }
@@ -120,7 +120,7 @@ func (l *ListView) ToggleSelected() {
 // SelectAll selects all visible instances.
 func (l *ListView) SelectAll() {
 	for _, inst := range l.instances {
-		l.selected[inst.Name] = true
+		l.selected[inst.ID] = true
 	}
 }
 
@@ -129,9 +129,9 @@ func (l *ListView) ClearSelected() {
 	l.selected = make(map[string]bool)
 }
 
-// IsSelected returns whether a name is multi-selected.
-func (l *ListView) IsSelected(name string) bool {
-	return l.selected[name]
+// IsSelected returns whether an instance ID is multi-selected.
+func (l *ListView) IsSelected(id string) bool {
+	return l.selected[id]
 }
 
 // SelectedCount returns the number of multi-selected items.
@@ -139,16 +139,16 @@ func (l *ListView) SelectedCount() int {
 	return len(l.selected)
 }
 
-// SelectedNames returns the names of all multi-selected items, or nil if none.
-func (l *ListView) SelectedNames() []string {
+// SelectedIDs returns the IDs of all multi-selected items, or nil if none.
+func (l *ListView) SelectedIDs() []string {
 	if len(l.selected) == 0 {
 		return nil
 	}
-	names := make([]string, 0, len(l.selected))
-	for name := range l.selected {
-		names = append(names, name)
+	ids := make([]string, 0, len(l.selected))
+	for id := range l.selected {
+		ids = append(ids, id)
 	}
-	return names
+	return ids
 }
 
 // Cursor returns the current cursor index.
@@ -262,7 +262,7 @@ func (l *ListView) View() string {
 		status := l.styleStatus(inst.Status)
 		mode := l.styleMode(inst.Mode)
 		dir := truncate(inst.Dir, colDir)
-		act := truncate(l.activity[inst.Name], colActivity)
+		act := truncate(l.activity[inst.ID], colActivity)
 		if act == "" {
 			act = "-"
 		}
@@ -277,7 +277,7 @@ func (l *ListView) View() string {
 		// Checkbox prefix (only when multi-select is active)
 		checkPrefix := ""
 		if hasSelection {
-			if l.selected[inst.Name] {
+			if l.selected[inst.ID] {
 				checkPrefix = "[x] "
 			} else {
 				checkPrefix = "[ ] "
@@ -299,7 +299,7 @@ func (l *ListView) View() string {
 		switch {
 		case i == l.cursor:
 			row = l.theme.Selected.Width(l.width).Render(row)
-		case l.selected[inst.Name]:
+		case l.selected[inst.ID]:
 			row = l.theme.MultiSelected.Width(l.width).Render(row)
 		default:
 			row = l.theme.TableRow.Width(l.width).Render(row)

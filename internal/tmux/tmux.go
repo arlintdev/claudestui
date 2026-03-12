@@ -8,6 +8,7 @@ import (
 )
 
 const SessionName = "claudes"
+const DashboardWindowName = "_dashboard"
 
 // Client wraps tmux CLI interactions.
 type Client struct{}
@@ -42,7 +43,7 @@ func (c *Client) EnsureSession(dashboardCmd string) (bool, error) {
 	if err == nil {
 		return false, nil
 	}
-	args := []string{"new-session", "-d", "-s", SessionName, "-n", "dashboard"}
+	args := []string{"new-session", "-d", "-s", SessionName, "-n", DashboardWindowName}
 	if dashboardCmd != "" {
 		args = append(args, dashboardCmd)
 	}
@@ -54,9 +55,14 @@ func (c *Client) EnsureSession(dashboardCmd string) (bool, error) {
 }
 
 // RespawnDashboard kills whatever is running in the dashboard window
-// and starts the given command in its place.
+// and starts the given command in its place. Handles migration from
+// the old "dashboard" name to the new "_dashboard" name.
 func (c *Client) RespawnDashboard(cmd string) error {
-	target := fmt.Sprintf("%s:dashboard", SessionName)
+	// Migrate: rename old "dashboard" window to "_dashboard" if needed.
+	oldTarget := fmt.Sprintf("%s:dashboard", SessionName)
+	c.run("rename-window", "-t", oldTarget, DashboardWindowName)
+
+	target := fmt.Sprintf("%s:%s", SessionName, DashboardWindowName)
 	_, err := c.run("respawn-window", "-k", "-t", target, cmd)
 	if err != nil {
 		return fmt.Errorf("respawn-window: %w", err)
@@ -93,12 +99,13 @@ type WindowInfo struct {
 	PaneCommand string // pane_current_command ("claude", "zsh", etc.)
 	PanePath    string // pane_current_path (working directory)
 	PanePID     string // pane_pid
+	PaneDead    bool   // pane_dead — true when process exited (remain-on-exit)
 }
 
 // ListWindows returns all windows in the claudes session.
 func (c *Client) ListWindows() ([]WindowInfo, error) {
 	out, err := c.run("list-windows", "-t", SessionName,
-		"-F", "#{window_id}\t#{window_index}\t#{window_name}\t#{window_active}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_pid}")
+		"-F", "#{window_id}\t#{window_index}\t#{window_name}\t#{window_active}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_pid}\t#{pane_dead}")
 	if err != nil {
 		return nil, fmt.Errorf("list-windows: %w", err)
 	}
@@ -108,8 +115,8 @@ func (c *Client) ListWindows() ([]WindowInfo, error) {
 
 	var windows []WindowInfo
 	for _, line := range strings.Split(out, "\n") {
-		parts := strings.SplitN(line, "\t", 7)
-		if len(parts) < 7 {
+		parts := strings.SplitN(line, "\t", 8)
+		if len(parts) < 8 {
 			continue
 		}
 		windows = append(windows, WindowInfo{
@@ -120,6 +127,7 @@ func (c *Client) ListWindows() ([]WindowInfo, error) {
 			PaneCommand: parts[4],
 			PanePath:    parts[5],
 			PanePID:     parts[6],
+			PaneDead:    parts[7] == "1",
 		})
 	}
 	return windows, nil
@@ -142,6 +150,13 @@ func (c *Client) WindowInfoMap() map[string]WindowInfo {
 func (c *Client) SetWindowOption(windowID, key, value string) {
 	target := fmt.Sprintf("%s:%s", SessionName, windowID)
 	c.run("set-option", "-t", target, "@"+key, value)
+}
+
+// SetRemainOnExit enables remain-on-exit for a window so the pane stays
+// visible (as dead) when its process exits, rather than vanishing instantly.
+func (c *Client) SetRemainOnExit(windowID string) {
+	target := fmt.Sprintf("%s:%s", SessionName, windowID)
+	c.run("set-option", "-t", target, "remain-on-exit", "on")
 }
 
 // GetWindowOption reads a user-defined option from a tmux window.
@@ -242,7 +257,7 @@ func (c *Client) SelectWindow(windowID string) error {
 // Ctrl-Space (root table, no prefix needed) jumps back to the dashboard.
 // Ctrl-Left/Right cycle through windows.
 func (c *Client) SetupKeybindings() {
-	dashTarget := fmt.Sprintf("%s:dashboard", SessionName)
+	dashTarget := fmt.Sprintf("%s:%s", SessionName, DashboardWindowName)
 	c.run("bind-key", "-T", "root", "C-Space", "select-window", "-t", dashTarget)
 	c.run("bind-key", "-T", "root", "C-Left", "previous-window")
 	c.run("bind-key", "-T", "root", "C-Right", "next-window")
@@ -278,7 +293,11 @@ func (c *Client) DetachClient() error {
 // pane persists after the TUI process exits. This prevents the session
 // from being destroyed when instances are still running.
 func (c *Client) KeepDashboardAlive() {
-	target := fmt.Sprintf("%s:dashboard", SessionName)
+	// Migrate old name if needed
+	oldTarget := fmt.Sprintf("%s:dashboard", SessionName)
+	c.run("rename-window", "-t", oldTarget, DashboardWindowName)
+
+	target := fmt.Sprintf("%s:%s", SessionName, DashboardWindowName)
 	c.run("set-option", "-t", target, "remain-on-exit", "on")
 }
 

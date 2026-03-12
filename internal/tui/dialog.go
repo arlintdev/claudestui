@@ -27,6 +27,7 @@ const (
 	DialogFilter
 	DialogSessionPicker
 	DialogContextMenu
+	DialogGroupName
 )
 
 // Model choices for the selector.
@@ -35,11 +36,12 @@ var modelLabels = []string{"default", "sonnet", "opus", "haiku"}
 
 // Dialog manages modal dialog state.
 type Dialog struct {
-	Kind      DialogKind
-	inputs    []textinput.Model // for new instance dialog (name, dir, task)
-	focus     int               // active input index (0-2 = text, 3 = model)
-	target    string            // instance name for confirm dialogs
-	profiles  []string          // available profile names
+	Kind       DialogKind
+	inputs     []textinput.Model // for new instance dialog (name, dir, task)
+	focus      int               // active input index (0-2 = text, 3 = model)
+	target     string            // instance ID for confirm dialogs
+	targetName string            // display name for confirm dialogs
+	profiles   []string          // available profile names
 	profCur   int               // profile cursor
 	theme     Theme
 	width     int
@@ -68,6 +70,10 @@ type Dialog struct {
 	menuCur   int
 	menuX     int
 	menuY     int
+
+	// Group name dialog
+	groupNameInput textinput.Model
+	groupTargetIDs []string // IDs to group
 }
 
 // menuItem represents a single context menu entry.
@@ -118,9 +124,10 @@ func (d *Dialog) OpenNew() {
 }
 
 // OpenConfirmDelete opens the inline delete confirmation in the footer.
-func (d *Dialog) OpenConfirmDelete(instanceName string) {
+func (d *Dialog) OpenConfirmDelete(id, displayName string) {
 	d.Kind = DialogConfirmDelete
-	d.target = instanceName
+	d.target = id
+	d.targetName = displayName
 }
 
 // OpenConfirmBatchDelete opens the inline batch delete confirmation in the footer.
@@ -136,7 +143,7 @@ func (d *Dialog) BatchTargets() []string {
 
 // IsInlineDialog returns true if the current dialog renders in the footer, not as an overlay.
 func (d *Dialog) IsInlineDialog() bool {
-	return d.Kind == DialogFilter || d.Kind == DialogConfirmDelete || d.Kind == DialogConfirmBatchDelete
+	return d.Kind == DialogFilter || d.Kind == DialogConfirmDelete || d.Kind == DialogConfirmBatchDelete || d.Kind == DialogGroupName
 }
 
 // IsSidePanel returns true if the dialog renders as a side panel.
@@ -159,9 +166,9 @@ func (d *Dialog) OpenFilter() {
 }
 
 // OpenSessionPicker opens the session picker for targeted resume.
-func (d *Dialog) OpenSessionPicker(instanceName string, sessions []claude.SessionInfo) {
+func (d *Dialog) OpenSessionPicker(id string, sessions []claude.SessionInfo) {
 	d.Kind = DialogSessionPicker
-	d.target = instanceName
+	d.target = id
 	d.sessions = sessions
 	d.sessionCur = 0
 }
@@ -169,7 +176,8 @@ func (d *Dialog) OpenSessionPicker(instanceName string, sessions []claude.Sessio
 // OpenContextMenu opens a right-click context menu for an instance.
 func (d *Dialog) OpenContextMenu(inst *instance.Instance, x, y int) {
 	d.Kind = DialogContextMenu
-	d.target = inst.Name
+	d.target = inst.ID
+	d.targetName = inst.Name
 	d.menuCur = 0
 	d.menuX = x
 	d.menuY = y
@@ -198,16 +206,40 @@ func (d *Dialog) SelectedMenuAction() string {
 	return ""
 }
 
+// OpenGroupName opens the group naming dialog.
+func (d *Dialog) OpenGroupName(selectedIDs []string) {
+	d.Kind = DialogGroupName
+	d.groupTargetIDs = selectedIDs
+	d.groupNameInput = textinput.New()
+	d.groupNameInput.Placeholder = "group name"
+	d.groupNameInput.CharLimit = 30
+	d.groupNameInput.SetValue(fmt.Sprintf("group-%d", len(selectedIDs)))
+	d.groupNameInput.Focus()
+	d.groupNameInput.CursorEnd()
+}
+
+// GroupNameValue returns the entered group name.
+func (d *Dialog) GroupNameValue() string {
+	return d.groupNameInput.Value()
+}
+
+// GroupTargetIDs returns the IDs to be grouped.
+func (d *Dialog) GroupTargetIDs() []string {
+	return d.groupTargetIDs
+}
+
 // Close dismisses the dialog.
 func (d *Dialog) Close() {
 	d.Kind = DialogNone
 	d.target = ""
+	d.targetName = ""
 	d.inputs = nil
 	d.sessions = nil
 	d.batchTargets = nil
 	d.dirCompletions = nil
 	d.dirCompIdx = -1
 	d.menuItems = nil
+	d.groupTargetIDs = nil
 }
 
 // Target returns the target instance name (for confirm dialogs).
@@ -257,6 +289,8 @@ func (d *Dialog) Update(msg tea.Msg) tea.Cmd {
 		return d.updateSessionPicker(msg)
 	case DialogContextMenu:
 		return d.updateContextMenu(msg)
+	case DialogGroupName:
+		return d.updateGroupName(msg)
 	}
 	return nil
 }
@@ -444,6 +478,12 @@ func (d *Dialog) updateSessionPicker(msg tea.Msg) tea.Cmd {
 	return nil
 }
 
+func (d *Dialog) updateGroupName(msg tea.Msg) tea.Cmd {
+	var cmd tea.Cmd
+	d.groupNameInput, cmd = d.groupNameInput.Update(msg)
+	return cmd
+}
+
 func (d *Dialog) updateContextMenu(msg tea.Msg) tea.Cmd {
 	if msg, ok := msg.(tea.KeyMsg); ok {
 		switch msg.String() {
@@ -487,6 +527,8 @@ func (d *Dialog) View() string {
 		return d.viewSessionPicker()
 	case DialogContextMenu:
 		return d.viewContextMenu()
+	case DialogGroupName:
+		return d.viewGroupName()
 	default:
 		return ""
 	}
@@ -589,8 +631,17 @@ func (d *Dialog) viewNew() string {
 		Render(lipgloss.JoinVertical(lipgloss.Left, title, "", content))
 }
 
+func (d *Dialog) viewGroupName() string {
+	return d.theme.Label.Render("Group name: ") + d.groupNameInput.View() +
+		"  " + d.theme.Muted.Render("Enter confirm  Esc cancel")
+}
+
 func (d *Dialog) viewConfirmDelete() string {
-	return d.theme.ModeDanger.Render("Delete "+d.target+"? ") +
+	name := d.targetName
+	if name == "" {
+		name = d.target
+	}
+	return d.theme.ModeDanger.Render("Delete "+name+"? ") +
 		d.theme.Muted.Render("(y/enter) confirm  (n/esc) cancel")
 }
 
@@ -677,7 +728,11 @@ func (d *Dialog) viewSessionPicker() string {
 }
 
 func (d *Dialog) viewContextMenu() string {
-	title := d.theme.Bold.Render(d.target)
+	name := d.targetName
+	if name == "" {
+		name = d.target
+	}
+	title := d.theme.Bold.Render(name)
 
 	var rows []string
 	for i, item := range d.menuItems {

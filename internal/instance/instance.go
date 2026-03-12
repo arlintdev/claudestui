@@ -1,10 +1,19 @@
 package instance
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"sync"
 	"time"
 )
+
+// GenerateID returns an 8-character lowercase hex string (4 random bytes).
+func GenerateID() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
 
 // Status represents the running state of a Claude instance.
 type Status int
@@ -46,6 +55,7 @@ func (m Mode) String() string {
 
 // Instance represents a managed Claude Code session.
 type Instance struct {
+	ID        string // unique identifier (8-char hex)
 	Name      string
 	Dir       string
 	Task      string
@@ -82,13 +92,14 @@ func (i *Instance) Uptime() string {
 
 // Store is the persistence interface for instances.
 type Store interface {
-	Save(name, dir, task, mode, model, groupName, windowID, sessionID, startedAt string) error
+	Save(id, name, dir, task, mode, model, groupName, windowID, sessionID, startedAt string) error
 	All() ([]StoreRow, error)
-	Delete(name string) error
+	Delete(id string) error
 }
 
 // StoreRow represents a persisted instance from the database.
 type StoreRow struct {
+	ID        string
 	Name      string
 	Dir       string
 	Task      string
@@ -121,12 +132,12 @@ func (m *Manager) Add(inst *Instance) {
 	m.persist(inst)
 }
 
-// Remove deletes an instance by name.
-func (m *Manager) Remove(name string) {
+// Remove deletes an instance by ID.
+func (m *Manager) Remove(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i, inst := range m.instances {
-		if inst.Name == name {
+		if inst.ID == id {
 			m.instances = append(m.instances[:i], m.instances[i+1:]...)
 			return
 		}
@@ -142,8 +153,20 @@ func (m *Manager) All() []*Instance {
 	return out
 }
 
-// Get returns an instance by name.
-func (m *Manager) Get(name string) *Instance {
+// Get returns an instance by ID.
+func (m *Manager) Get(id string) *Instance {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, inst := range m.instances {
+		if inst.ID == id {
+			return inst
+		}
+	}
+	return nil
+}
+
+// GetByName returns the first instance matching a name (for backward compat).
+func (m *Manager) GetByName(name string) *Instance {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, inst := range m.instances {
@@ -193,20 +216,20 @@ func (m *Manager) Stats() (total, running, idle, stopped, errored int, tokensIn,
 	return
 }
 
-// SaveInstance persists the current state of a named instance to the store.
-func (m *Manager) SaveInstance(name string) {
-	inst := m.Get(name)
+// SaveInstance persists the current state of an instance by ID.
+func (m *Manager) SaveInstance(id string) {
+	inst := m.Get(id)
 	if inst == nil {
 		return
 	}
 	m.persist(inst)
 }
 
-// Delete removes an instance from memory and the store.
-func (m *Manager) Delete(name string) {
-	m.Remove(name)
+// Delete removes an instance from memory and the store by ID.
+func (m *Manager) Delete(id string) {
+	m.Remove(id)
 	if m.store != nil {
-		_ = m.store.Delete(name)
+		_ = m.store.Delete(id)
 	}
 }
 
@@ -231,6 +254,7 @@ func (m *Manager) LoadAll() {
 			startedAt, _ = time.Parse(time.RFC3339, r.StartedAt)
 		}
 		inst := &Instance{
+			ID:        r.ID,
 			Name:      r.Name,
 			Dir:       r.Dir,
 			Task:      r.Task,
@@ -246,42 +270,46 @@ func (m *Manager) LoadAll() {
 	}
 }
 
-// SetGroup assigns a group name to the given instances and persists.
-func (m *Manager) SetGroup(names []string, groupName string) {
+// SetGroup assigns a group name to the given instances (by ID) and persists.
+func (m *Manager) SetGroup(ids []string, groupName string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	idSet := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		idSet[id] = true
+	}
 	for _, inst := range m.instances {
-		for _, name := range names {
-			if inst.Name == name {
-				inst.GroupName = groupName
-				m.persist(inst)
-			}
+		if idSet[inst.ID] {
+			inst.GroupName = groupName
+			m.persist(inst)
 		}
 	}
 }
 
-// ClearGroup removes group membership from the given instances and persists.
-func (m *Manager) ClearGroup(names []string) {
+// ClearGroup removes group membership from the given instances (by ID) and persists.
+func (m *Manager) ClearGroup(ids []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	idSet := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		idSet[id] = true
+	}
 	for _, inst := range m.instances {
-		for _, name := range names {
-			if inst.Name == name {
-				inst.GroupName = ""
-				m.persist(inst)
-			}
+		if idSet[inst.ID] {
+			inst.GroupName = ""
+			m.persist(inst)
 		}
 	}
 }
 
-// GroupMembers returns the names of all instances in the given group.
+// GroupMembers returns the IDs of all instances in the given group.
 func (m *Manager) GroupMembers(groupName string) []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var out []string
 	for _, inst := range m.instances {
 		if inst.GroupName == groupName {
-			out = append(out, inst.Name)
+			out = append(out, inst.ID)
 		}
 	}
 	return out
@@ -296,6 +324,6 @@ func (m *Manager) persist(inst *Instance) {
 	if !inst.StartedAt.IsZero() {
 		startedAt = inst.StartedAt.Format(time.RFC3339)
 	}
-	_ = m.store.Save(inst.Name, inst.Dir, inst.Task, inst.Mode.String(),
+	_ = m.store.Save(inst.ID, inst.Name, inst.Dir, inst.Task, inst.Mode.String(),
 		inst.Model, inst.GroupName, inst.WindowID, inst.SessionID, startedAt)
 }

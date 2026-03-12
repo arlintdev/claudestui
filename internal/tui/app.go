@@ -28,9 +28,9 @@ type errMsg struct{ err error }
 
 // tiledState tracks an active tiled view so we can break it apart later.
 type tiledState struct {
-	baseWindowID  string            // the window all panes were joined into
-	paneNames     []string          // instance names in the tiled view
-	originalWindows map[string]string // name → original windowID (before join)
+	baseWindowID    string            // the window all panes were joined into
+	paneIDs         []string          // instance IDs in the tiled view
+	originalWindows map[string]string // id → original windowID (before join)
 }
 
 // Model is the root Bubble Tea model.
@@ -75,7 +75,7 @@ func New(cfg config.Config, mgr *instance.Manager, tc *tmux.Client, launcher *cl
 var shortcutLabels = []struct{ key, desc string }{
 	{"n", "New"}, {"d", "Danger"}, {"^s", "Stop"}, {"^x", "Stop Idle"}, {"^d", "Delete"},
 	{"Enter", "Attach"}, {"^r", "Resume"}, {"Space", "Select"}, {"^a", "All"},
-	{"^g", "Group"}, {"^b", "Ungroup"}, {"/", "Filter"}, {"L", "Profile"}, {"^hjkl", "Panes"}, {"^Space", "Back"}, {"?", "Help"}, {"q", "Quit"},
+	{"^g", "Group"}, {"^b", "Ungroup"}, {"t", "Tile"}, {"/", "Filter"}, {"L", "Profile"}, {"^hjkl", "Panes"}, {"^Space", "Back"}, {"?", "Help"}, {"q", "Quit"},
 }
 
 // calcShortcutRows computes how many lines the shortcut bar needs at current width.
@@ -156,8 +156,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Sync per-instance activity from JSONL watcher
 		if m.launcher.Activity != nil {
-			for name, line := range m.launcher.Activity.All() {
-				m.list.SetActivity(name, line)
+			for id, line := range m.launcher.Activity.All() {
+				m.list.SetActivity(id, line)
 			}
 		}
 
@@ -222,28 +222,27 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.list.SelectAll()
 
 	case key.Matches(msg, m.keys.Group):
-		if names := m.list.SelectedNames(); len(names) >= 2 {
-			m.manager.SetGroup(names, "group-"+names[0])
-			m.list.ClearSelected()
+		if ids := m.list.SelectedIDs(); len(ids) >= 2 {
+			m.dialog.OpenGroupName(ids)
 		}
 
 	case key.Matches(msg, m.keys.BreakTile):
 		if m.tiled != nil {
 			m.breakTiledView()
-		} else if names := m.list.SelectedNames(); names != nil {
-			m.manager.ClearGroup(names)
+		} else if ids := m.list.SelectedIDs(); ids != nil {
+			m.manager.ClearGroup(ids)
 			m.list.ClearSelected()
 		} else if sel := m.list.Selected(); sel != nil && sel.GroupName != "" {
-			m.manager.ClearGroup([]string{sel.Name})
+			m.manager.ClearGroup([]string{sel.ID})
 		}
 
 	case key.Matches(msg, m.keys.Stop):
-		if names := m.list.SelectedNames(); names != nil {
+		if ids := m.list.SelectedIDs(); ids != nil {
 			// Batch stop
-			for _, name := range names {
-				inst := m.manager.Get(name)
+			for _, id := range ids {
+				inst := m.manager.Get(id)
 				if inst != nil && inst.Status != instance.StatusStopped {
-					if err := m.launcher.Kill(name); err != nil {
+					if err := m.launcher.Kill(id); err != nil {
 						m.err = err
 						m.errAt = time.Now()
 					}
@@ -251,7 +250,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.list.ClearSelected()
 		} else if sel := m.list.Selected(); sel != nil && sel.Status != instance.StatusStopped {
-			if err := m.launcher.Kill(sel.Name); err != nil {
+			if err := m.launcher.Kill(sel.ID); err != nil {
 				m.err = err
 				m.errAt = time.Now()
 			}
@@ -260,7 +259,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.StopIdle):
 		for _, inst := range m.manager.All() {
 			if inst.Status == instance.StatusIdle {
-				if err := m.launcher.Kill(inst.Name); err != nil {
+				if err := m.launcher.Kill(inst.ID); err != nil {
 					m.err = err
 					m.errAt = time.Now()
 				}
@@ -268,15 +267,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, m.keys.Delete):
-		if names := m.list.SelectedNames(); names != nil {
-			m.dialog.OpenConfirmBatchDelete(names)
+		if ids := m.list.SelectedIDs(); ids != nil {
+			m.dialog.OpenConfirmBatchDelete(ids)
 		} else if sel := m.list.Selected(); sel != nil {
-			m.dialog.OpenConfirmDelete(sel.Name)
+			m.dialog.OpenConfirmDelete(sel.ID, sel.Name)
 		}
 
 	case key.Matches(msg, m.keys.Danger):
 		if sel := m.list.Selected(); sel != nil {
-			if err := m.launcher.ToggleDangerous(sel.Name); err != nil {
+			if err := m.launcher.ToggleDangerous(sel.ID); err != nil {
 				m.err = err
 				m.errAt = time.Now()
 			}
@@ -285,7 +284,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Resume):
 		if sel := m.list.Selected(); sel != nil {
 			if sel.Status == instance.StatusStopped || sel.Status == instance.StatusError {
-				if err := m.launcher.Resume(sel.Name); err != nil {
+				if err := m.launcher.Resume(sel.ID); err != nil {
 					m.err = err
 					m.errAt = time.Now()
 				}
@@ -293,37 +292,41 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, m.keys.Attach):
-		if names := m.list.SelectedNames(); names != nil {
-			m.openTiledView(names)
+		if ids := m.list.SelectedIDs(); ids != nil {
+			m.openTiledView(ids)
 			m.list.ClearSelected()
 		} else if sel := m.list.Selected(); sel != nil {
-			// If instance is in a group, open all group members tiled
-			if sel.GroupName != "" {
-				members := m.manager.GroupMembers(sel.GroupName)
-				if len(members) > 1 {
-					m.openTiledView(members)
-					return m, nil
-				}
-			}
-			// Running/idle: just attach. Stopped: resume + attach.
+			// Always attach to the single selected instance (even if grouped)
 			if sel.Status == instance.StatusStopped || sel.Status == instance.StatusError {
-				if err := m.launcher.Resume(sel.Name); err != nil {
+				if err := m.launcher.Resume(sel.ID); err != nil {
 					m.err = err
 					m.errAt = time.Now()
 					return m, nil
 				}
 				// Re-fetch to get updated WindowID after resume
-				sel = m.manager.Get(sel.Name)
+				sel = m.manager.Get(sel.ID)
 			}
 			if sel != nil && sel.WindowID != "" {
 				_ = m.tmux.SelectWindow(sel.WindowID)
 			}
 		}
 
+	case key.Matches(msg, m.keys.TileGroup):
+		if sel := m.list.Selected(); sel != nil && sel.GroupName != "" {
+			members := m.manager.GroupMembers(sel.GroupName)
+			if len(members) > 0 {
+				m.openTiledView(members)
+			}
+		} else if ids := m.list.SelectedIDs(); ids != nil {
+			m.openTiledView(ids)
+			m.list.ClearSelected()
+		}
+
 	case msg.String() == "ctrl+enter":
 		if sel := m.list.Selected(); sel != nil {
 			m.dialog.OpenContextMenu(sel, m.width/2-12, m.headerHeight()+2+m.list.Cursor())
 		}
+
 
 	case key.Matches(msg, m.keys.Filter):
 		m.dialog.OpenFilter()
@@ -365,25 +368,18 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.Button {
 	case tea.MouseButtonLeft:
-		// Attach — same logic as Enter key
+		// Attach — same logic as Enter key (single instance)
 		sel := m.list.Selected()
 		if sel == nil {
 			return m, nil
 		}
-		if sel.GroupName != "" {
-			members := m.manager.GroupMembers(sel.GroupName)
-			if len(members) > 1 {
-				m.openTiledView(members)
-				return m, nil
-			}
-		}
 		if sel.Status == instance.StatusStopped || sel.Status == instance.StatusError {
-			if err := m.launcher.Resume(sel.Name); err != nil {
+			if err := m.launcher.Resume(sel.ID); err != nil {
 				m.err = err
 				m.errAt = time.Now()
 				return m, nil
 			}
-			sel = m.manager.Get(sel.Name)
+			sel = m.manager.Get(sel.ID)
 		}
 		if sel != nil && sel.WindowID != "" {
 			_ = m.tmux.SelectWindow(sel.WindowID)
@@ -543,6 +539,25 @@ func (m Model) handleDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+	case DialogGroupName:
+		switch msg.String() {
+		case "esc":
+			m.dialog.Close()
+			return m, nil
+		case "enter":
+			groupName := m.dialog.GroupNameValue()
+			ids := m.dialog.GroupTargetIDs()
+			m.dialog.Close()
+			if groupName != "" && len(ids) > 0 {
+				m.manager.SetGroup(ids, groupName)
+				m.list.ClearSelected()
+			}
+			return m, nil
+		default:
+			cmd := m.dialog.Update(msg)
+			return m, cmd
+		}
+
 	case DialogContextMenu:
 		switch msg.String() {
 		case "esc":
@@ -562,71 +577,69 @@ func (m Model) handleDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// executeMenuAction dispatches a context menu action.
-func (m Model) executeMenuAction(action, name string) (tea.Model, tea.Cmd) {
+// executeMenuAction dispatches a context menu action. The id param is an instance ID.
+func (m Model) executeMenuAction(action, id string) (tea.Model, tea.Cmd) {
 	switch action {
 	case "attach":
-		inst := m.manager.Get(name)
+		inst := m.manager.Get(id)
 		if inst == nil {
 			return m, nil
-		}
-		if inst.GroupName != "" {
-			members := m.manager.GroupMembers(inst.GroupName)
-			if len(members) > 1 {
-				m.openTiledView(members)
-				return m, nil
-			}
 		}
 		if inst.WindowID != "" {
 			_ = m.tmux.SelectWindow(inst.WindowID)
 		}
 	case "stop":
-		if err := m.launcher.Kill(name); err != nil {
+		if err := m.launcher.Kill(id); err != nil {
 			m.err = err
 			m.errAt = time.Now()
 		}
 	case "delete":
-		m.dialog.OpenConfirmDelete(name)
+		inst := m.manager.Get(id)
+		displayName := id
+		if inst != nil {
+			displayName = inst.Name
+		}
+		m.dialog.OpenConfirmDelete(id, displayName)
 	case "resume":
-		if err := m.launcher.Resume(name); err != nil {
+		if err := m.launcher.Resume(id); err != nil {
 			m.err = err
 			m.errAt = time.Now()
 		}
 	case "danger":
-		if err := m.launcher.ToggleDangerous(name); err != nil {
+		if err := m.launcher.ToggleDangerous(id); err != nil {
 			m.err = err
 			m.errAt = time.Now()
 		}
 	case "ungroup":
-		m.manager.ClearGroup([]string{name})
+		m.manager.ClearGroup([]string{id})
 	}
 	return m, nil
 }
 
 // openTiledView joins multiple instance windows into a single tiled pane layout.
-func (m *Model) openTiledView(names []string) {
+func (m *Model) openTiledView(ids []string) {
 	// Collect instances that have live windows; resume stopped ones first
 	var live []string
-	for _, name := range names {
-		inst := m.manager.Get(name)
+	for _, id := range ids {
+		inst := m.manager.Get(id)
 		if inst == nil {
 			continue
 		}
 		// Already running with a window — use it directly
 		if inst.WindowID != "" && inst.Status != instance.StatusStopped && inst.Status != instance.StatusError {
-			live = append(live, name)
+			live = append(live, id)
 			continue
 		}
 		// Stopped/error — try to resume
 		if inst.Status == instance.StatusStopped || inst.Status == instance.StatusError {
-			if err := m.launcher.Resume(name); err != nil {
-				m.err = fmt.Errorf("resume %s: %w", name, err)
+			if err := m.launcher.Resume(id); err != nil {
+				m.err = fmt.Errorf("resume %s: %w", inst.Name, err)
 				m.errAt = time.Now()
 				continue
 			}
-			inst = m.manager.Get(name) // re-fetch after resume
+			inst = m.manager.Get(id) // re-fetch after resume
 			if inst != nil && inst.WindowID != "" {
-				live = append(live, name)
+				live = append(live, id)
 			}
 		}
 	}
@@ -654,12 +667,12 @@ func (m *Model) openTiledView(names []string) {
 	origWindows[live[0]] = baseWinID
 
 	// Join remaining instances into the base window
-	for _, name := range live[1:] {
-		inst := m.manager.Get(name)
+	for _, id := range live[1:] {
+		inst := m.manager.Get(id)
 		if inst == nil || inst.WindowID == "" {
 			continue
 		}
-		origWindows[name] = inst.WindowID
+		origWindows[id] = inst.WindowID
 		if err := m.tmux.JoinPane(inst.WindowID, baseWinID); err != nil {
 			m.err = err
 			m.errAt = time.Now()
@@ -679,14 +692,14 @@ func (m *Model) openTiledView(names []string) {
 	// Track tiled state for later break
 	m.tiled = &tiledState{
 		baseWindowID:    baseWinID,
-		paneNames:       live,
+		paneIDs:         live,
 		originalWindows: origWindows,
 	}
 
 	// Tell the launcher to skip status refresh for tiled instances
-	m.launcher.TiledNames = make(map[string]bool, len(live))
-	for _, name := range live {
-		m.launcher.TiledNames[name] = true
+	m.launcher.TiledIDs = make(map[string]bool, len(live))
+	for _, id := range live {
+		m.launcher.TiledIDs[id] = true
 	}
 }
 
@@ -699,21 +712,21 @@ func (m *Model) breakTiledView() {
 	panes, err := m.tmux.ListPanes(m.tiled.baseWindowID)
 	if err != nil || len(panes) <= 1 {
 		m.tiled = nil
-		m.launcher.TiledNames = nil
+		m.launcher.TiledIDs = nil
 		return
 	}
 
 	// Break all panes except the first one (which stays in the base window)
 	// The first pane is the base instance — it keeps the original window
-	baseInstance := m.tiled.paneNames[0]
+	baseID := m.tiled.paneIDs[0]
 
-	// Build a name queue for non-base panes
-	nameIdx := 1 // start from second name
-	for i := 1; i < len(panes) && nameIdx < len(m.tiled.paneNames); i++ {
-		name := m.tiled.paneNames[nameIdx]
-		nameIdx++
+	// Build an ID queue for non-base panes
+	idIdx := 1 // start from second ID
+	for i := 1; i < len(panes) && idIdx < len(m.tiled.paneIDs); i++ {
+		instID := m.tiled.paneIDs[idIdx]
+		idIdx++
 
-		newWinID, err := m.tmux.BreakPane(panes[i].PaneID, name)
+		newWinID, err := m.tmux.BreakPane(panes[i].PaneID, instID)
 		if err != nil {
 			m.err = err
 			m.errAt = time.Now()
@@ -721,22 +734,22 @@ func (m *Model) breakTiledView() {
 		}
 
 		// Update instance's window ID
-		inst := m.manager.Get(name)
+		inst := m.manager.Get(instID)
 		if inst != nil {
 			inst.WindowID = newWinID
-			m.manager.SaveInstance(name)
+			m.manager.SaveInstance(instID)
 		}
 	}
 
 	// The base instance keeps its original window ID
-	baseInst := m.manager.Get(baseInstance)
+	baseInst := m.manager.Get(baseID)
 	if baseInst != nil {
 		baseInst.WindowID = m.tiled.baseWindowID
-		m.manager.SaveInstance(baseInstance)
+		m.manager.SaveInstance(baseID)
 	}
 
 	m.tiled = nil
-	m.launcher.TiledNames = nil
+	m.launcher.TiledIDs = nil
 }
 
 func (m *Model) loadProfile(name string) {

@@ -23,6 +23,7 @@ type KeyMap struct {
 	SelectAll key.Binding
 	Group     key.Binding
 	BreakTile key.Binding
+	TileGroup key.Binding
 	StopIdle  key.Binding
 }
 
@@ -104,6 +105,10 @@ func DefaultKeyMap() KeyMap {
 		BreakTile: key.NewBinding(
 			key.WithKeys("ctrl+b"),
 			key.WithHelp("ctrl+b", "ungroup/break tile"),
+		),
+		TileGroup: key.NewBinding(
+			key.WithKeys("t"),
+			key.WithHelp("t", "open group tiled"),
 		),
 		StopIdle: key.NewBinding(
 			key.WithKeys("ctrl+x"),
