@@ -22,9 +22,131 @@ type ListView struct {
 	activity       map[string]string              // id → last activity line
 	activityStates map[string]*claude.ActivityState // id → enriched state
 	selected       map[string]bool                 // multi-select set (id → true)
+	animFrame      int                             // animation frame counter for robots
 }
 
 const cardRows = 5 // top border (with title+status) + 3 content lines + bottom border
+
+const robotWidth = 4 // each robot pose is 4 chars wide
+
+// Tick advances the animation frame counter.
+func (l *ListView) Tick() {
+	l.animFrame++
+}
+
+// robotFrames defines animation frames for each activity/status.
+// Each entry is a slice of [3]string frames that cycle.
+var robotFrames = map[string][][3]string{
+	"thinking": {
+		{`[..]`, `-[]-`, ` ╨╨ `},
+		{`[. ]`, `-[]-`, ` ╨╨ `},
+		{`[..]`, `-[]-`, ` ╨╨ `},
+		{`[ .]`, `-[]-`, ` ╨╨ `},
+	},
+	"reading": {
+		{`[°°]`, `-[]-`, ` ╨╨ `},
+		{`[°°]`, `-[]+`, ` ╨╨ `},
+		{`[°°]`, `-[]-`, ` ╨╨ `},
+		{`[°°]`, `+[]-`, ` ╨╨ `},
+	},
+	"writing": {
+		{`[..]`, `-[]╗`, ` ╨╨ `},
+		{`[..]`, `-[] `, ` ╨╨ `},
+		{`[..]`, `-[]╗`, ` ╨╨ `},
+		{`[..]`, `-[]╝`, ` ╨╨ `},
+	},
+	"running": {
+		{`\../`, `-[]-`, `╨  ╨`},
+		{`[..]`, `-[]-`, ` ╨╨ `},
+		{`\../`, `-[]-`, `╨  ╨`},
+		{`[..]`, `\[]/`, ` ╨╨ `},
+	},
+	"searching": {
+		{`[¬¬]`, `-[]-`, ` ╨╨ `},
+		{`[¬ ]`, `-[]-`, `╨ ╨ `},
+		{`[¬¬]`, `-[]-`, ` ╨╨ `},
+		{`[ ¬]`, `-[]-`, ` ╨ ╨`},
+	},
+	"browsing": {
+		{`[..]`, `╔[]-`, ` ╨╨ `},
+		{`[..]`, `-[]-`, ` ╨╨ `},
+		{`[..]`, `-[]╗`, ` ╨╨ `},
+		{`[..]`, `-[]-`, ` ╨╨ `},
+	},
+	"spawning": {
+		{`[..]`, `-[]+`, ` ╨╨ `},
+		{`[..]`, `-[] `, ` ╨╨ `},
+		{`[..]`, `-[]-`, ` ╨╨.`},
+		{`[..]`, `-[]-`, ` ╨╨ `},
+	},
+	"waiting": {
+		{`[..]`, ` [] `, ` ╨╨ `},
+		{`[  ]`, ` [] `, ` ╨╨ `},
+		{`[..]`, ` [] `, ` ╨╨ `},
+		{`[  ]`, ` [] `, ` ╨╨ `},
+	},
+	"idle": {
+		{`[..]`, ` [] `, ` ╨╨ `},
+		{`[..]`, ` [] `, ` ╨╨ `},
+		{`[--]`, ` [] `, ` ╨╨ `},
+		{`[..]`, ` [] `, ` ╨╨ `},
+	},
+	"error": {
+		{`[!!]`, `\[]/`, ` ╨╨ `},
+		{`[!!]`, `-[]-`, `╨  ╨`},
+		{`[!!]`, `\[]/`, ` ╨╨ `},
+		{`[!!]`, `-[]-`, `╨  ╨`},
+	},
+	"stopped": {
+		{`[__]`, ` [] `, ` ╨╨ `},
+	},
+}
+
+// robotPose returns the current animation frame and style for a robot.
+func (l *ListView) robotPose(inst *instance.Instance) ([3]string, lipgloss.Style) {
+	var key string
+	var style lipgloss.Style
+
+	if inst.Status == instance.StatusRunning {
+		if st, ok := l.activityStates[inst.ID]; ok && st.Kind != claude.ActivityNone {
+			switch st.Kind {
+			case claude.ActivityThinking:
+				key, style = "thinking", l.theme.ActivityThinking
+			case claude.ActivityReading:
+				key, style = "reading", l.theme.ActivityReading
+			case claude.ActivityWriting:
+				key, style = "writing", l.theme.ActivityWriting
+			case claude.ActivityRunning:
+				key, style = "running", l.theme.ActivityRunning
+			case claude.ActivitySearching:
+				key, style = "searching", l.theme.ActivitySearching
+			case claude.ActivityBrowsing:
+				key, style = "browsing", l.theme.ActivityBrowsing
+			case claude.ActivitySpawning:
+				key, style = "spawning", l.theme.ActivitySpawning
+			case claude.ActivityWaiting:
+				key, style = "waiting", l.theme.ActivityWaiting
+			default:
+				key, style = "running", l.theme.StatusRunning
+			}
+		} else {
+			key, style = "running", l.theme.StatusRunning
+		}
+	} else {
+		switch inst.Status {
+		case instance.StatusIdle:
+			key, style = "idle", l.theme.StatusIdle
+		case instance.StatusError:
+			key, style = "error", l.theme.StatusError
+		default:
+			key, style = "stopped", l.theme.StatusStopped
+		}
+	}
+
+	frames := robotFrames[key]
+	frame := frames[l.animFrame%len(frames)]
+	return frame, style
+}
 
 // NewListView creates a new list view.
 func NewListView(theme Theme) ListView {
@@ -326,21 +448,23 @@ func (l *ListView) View() string {
 		}
 		topBorder := leftPart + bc.Render(strings.Repeat("─", fillW)) + rightPart
 
-		// Content lines (3 lines)
+		// Content lines (3 lines) with robot on the right
 		vBarL := bc.Render("│")
 		vBarR := rc.Render("│")
+		pose, poseStyle := l.robotPose(inst)
+		textW := contentW - robotWidth - 1 // leave room for robot + gap
 		contentLines := []string{
-			l.cardLine2(inst, contentW),
-			l.cardLine3(inst, contentW),
-			l.cardLine4(inst, contentW),
+			l.cardLine2(inst, textW),
+			l.cardLine3(inst, textW),
+			l.cardLine4(inst, textW),
 		}
 		var wrappedLines []string
-		for _, line := range contentLines {
-			padW := contentW - lipgloss.Width(line)
+		for j, line := range contentLines {
+			padW := textW - lipgloss.Width(line)
 			if padW < 0 {
 				padW = 0
 			}
-			inner := " " + line + strings.Repeat(" ", padW) + " "
+			inner := " " + line + strings.Repeat(" ", padW) + " " + poseStyle.Render(pose[j]) + " "
 			wrappedLines = append(wrappedLines, vBarL+inner+vBarR)
 		}
 

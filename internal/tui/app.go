@@ -149,6 +149,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		m.launcher.RefreshStatuses()
 		m.list.Sync(m.manager.All())
+		m.list.Tick()
 
 		// Clear error flash after 5 seconds
 		if m.err != nil && time.Since(m.errAt) > 5*time.Second {
