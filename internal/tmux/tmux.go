@@ -273,8 +273,8 @@ func (c *Client) SetupKeybindings() {
 	c.run("bind-key", "-T", "root", "C-j", "select-pane", "-D")
 	c.run("bind-key", "-T", "root", "C-k", "select-pane", "-U")
 
-	// Ensure mouse mode is off so terminal-native text selection/copy works.
-	c.run("set-option", "-t", SessionName, "mouse", "off")
+	// Mouse on for scroll; hold Shift to select/copy with native terminal selection.
+	c.run("set-option", "-t", SessionName, "mouse", "on")
 	// Prevent apps (like Claude Code) from overwriting pane/window titles via escape sequences.
 	c.run("set-option", "-t", SessionName, "allow-rename", "off")
 

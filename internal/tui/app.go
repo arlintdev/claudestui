@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/arlintdev/claudes/internal/config"
 	"github.com/arlintdev/claudes/internal/instance"
 	"github.com/arlintdev/claudes/internal/tmux"
+	"github.com/arlintdev/claudes/internal/update"
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -25,6 +27,8 @@ const baseHeaderLines = 5
 type tickMsg time.Time
 type statusMsg struct{}
 type errMsg struct{ err error }
+type updateAvailableMsg struct{ release *update.Release }
+type updateAppliedMsg struct{ err error }
 
 // tiledState tracks an active tiled view so we can break it apart later.
 type tiledState struct {
@@ -52,10 +56,11 @@ type Model struct {
 	err          error
 	errAt        time.Time // when error was set, for flash bar timeout
 	tiled        *tiledState // active tiled view, if any
+	version      string     // current build version (e.g. "v0.5.0" or "dev")
 }
 
 // New creates the root model.
-func New(cfg config.Config, mgr *instance.Manager, tc *tmux.Client, launcher *claude.Launcher, sessions *claude.SessionStore) Model {
+func New(cfg config.Config, mgr *instance.Manager, tc *tmux.Client, launcher *claude.Launcher, sessions *claude.SessionStore, version string) Model {
 	theme := DefaultTheme()
 	return Model{
 		keys:   DefaultKeyMap(),
@@ -68,6 +73,7 @@ func New(cfg config.Config, mgr *instance.Manager, tc *tmux.Client, launcher *cl
 		launcher: launcher,
 		tmux:     tc,
 		sessions: sessions,
+		version:  version,
 	}
 }
 
@@ -115,9 +121,17 @@ func (m Model) headerHeight() int {
 	return baseHeaderLines + rows
 }
 
-// Init starts the tick timer.
+// Init starts the tick timer and checks for updates.
 func (m Model) Init() tea.Cmd {
-	return m.tick()
+	return tea.Batch(m.tick(), m.checkForUpdate())
+}
+
+func (m Model) checkForUpdate() tea.Cmd {
+	version := m.version
+	return func() tea.Msg {
+		rel := update.CheckLatest(version)
+		return updateAvailableMsg{release: rel}
+	}
 }
 
 func (m Model) tick() tea.Cmd {
@@ -162,6 +176,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		return m, m.tick()
+
+	case updateAvailableMsg:
+		if msg.release != nil {
+			m.dialog.OpenUpdate(m.version, msg.release.Version, msg.release.DownloadURL)
+		}
+		return m, nil
+
+	case updateAppliedMsg:
+		if msg.err != nil {
+			m.dialog.updateDownloading = false
+			m.dialog.updateErr = msg.err
+			return m, nil
+		}
+		// Update succeeded — re-exec the binary
+		exe, err := os.Executable()
+		if err != nil {
+			m.dialog.updateDownloading = false
+			m.dialog.updateErr = err
+			return m, nil
+		}
+		return m, tea.ExecProcess(exec.Command(exe), func(err error) tea.Msg {
+			return errMsg{err: err}
+		})
 
 	case errMsg:
 		m.err = msg.err
@@ -409,7 +446,7 @@ func (m Model) handleDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.dialog.AcceptCompletion(m.dialog.dirCompIdx)
 				return m, nil
 			}
-			name, dir, task, model, dangerous, resume := m.dialog.NewInstanceValues()
+			name, dir, task, model, host, dangerous, resume := m.dialog.NewInstanceValues()
 			if name == "" {
 				return m, nil
 			}
@@ -425,6 +462,7 @@ func (m Model) handleDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				Dir:       dir,
 				Task:      task,
 				Model:     model,
+				Host:      host,
 				Dangerous: dangerous,
 				Resume:    resume,
 			})
@@ -557,6 +595,32 @@ func (m Model) handleDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		default:
 			cmd := m.dialog.Update(msg)
 			return m, cmd
+		}
+
+	case DialogUpdate:
+		if m.dialog.updateDownloading {
+			return m, nil // ignore input while downloading
+		}
+		switch msg.String() {
+		case "esc", "n":
+			m.dialog.Close()
+			return m, nil
+		case "enter":
+			if m.dialog.updateCur == 1 || m.dialog.updateErr != nil {
+				// Skip or dismiss error
+				m.dialog.Close()
+				return m, nil
+			}
+			// Start download
+			m.dialog.updateDownloading = true
+			url := m.dialog.updateURL
+			return m, func() tea.Msg {
+				err := update.Apply(url)
+				return updateAppliedMsg{err: err}
+			}
+		default:
+			m.dialog.Update(msg)
+			return m, nil
 		}
 
 	case DialogContextMenu:
@@ -837,7 +901,11 @@ func (m Model) renderHeader() string {
 		artLines = append(artLines, m.theme.Logo.Render(l))
 	}
 	// Right-align tagline under the logo
-	tagline := m.theme.Muted.Render(logoTagline)
+	tag := logoTagline
+	if m.version != "" {
+		tag = logoTagline + " " + m.version
+	}
+	tagline := m.theme.Muted.Render(tag)
 	artLines = append(artLines, tagline)
 
 	// Pad info to same height
@@ -845,7 +913,12 @@ func (m Model) renderHeader() string {
 		info = append(info, "")
 	}
 
-	artW := lipgloss.Width(artLines[0]) // logo width (widest line)
+	artW := 0
+	for _, al := range artLines {
+		if w := lipgloss.Width(al); w > artW {
+			artW = w
+		}
+	}
 	var headerRows []string
 	for i := 0; i < len(artLines); i++ {
 		left := " " + info[i]

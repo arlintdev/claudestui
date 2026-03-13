@@ -15,6 +15,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// Version is set at build time via -ldflags "-X main.Version=vX.Y.Z".
+var Version = "dev"
+
 func main() {
 	checkPrereqs()
 
@@ -79,7 +82,7 @@ func runTUI(cfg config.Config, tc *tmux.Client) {
 	sessions := claude.NewSessionStore()
 	sessions.ForceScan()
 
-	model := tui.New(cfg, mgr, tc, launcher, sessions)
+	model := tui.New(cfg, mgr, tc, launcher, sessions, Version)
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	if _, err := p.Run(); err != nil {

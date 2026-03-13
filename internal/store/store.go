@@ -66,6 +66,7 @@ func (s *Store) ensureSchema() error {
 			task       TEXT NOT NULL DEFAULT '',
 			mode       TEXT NOT NULL DEFAULT 'safe',
 			model      TEXT NOT NULL DEFAULT '',
+			host       TEXT NOT NULL DEFAULT '',
 			group_name TEXT NOT NULL DEFAULT '',
 			window_id  TEXT NOT NULL DEFAULT '',
 			session_id TEXT NOT NULL DEFAULT '',
@@ -98,7 +99,9 @@ func (s *Store) ensureSchema() error {
 	}
 
 	if hasID {
-		return nil // already migrated
+		// Migrate: add host column if missing (ignore error if already exists).
+		_, _ = s.db.Exec("ALTER TABLE instances ADD COLUMN host TEXT NOT NULL DEFAULT ''")
+		return nil
 	}
 
 	// Migrate: old schema has name as PK, no id column.
@@ -149,17 +152,17 @@ func (s *Store) Close() error {
 }
 
 // Save persists an instance row (INSERT OR REPLACE).
-func (s *Store) Save(id, name, dir, task, mode, model, groupName, windowID, sessionID, startedAt string) error {
+func (s *Store) Save(id, name, dir, task, mode, model, host, groupName, windowID, sessionID, startedAt string) error {
 	const q = `INSERT OR REPLACE INTO instances
-		(id, name, dir, task, mode, model, group_name, window_id, session_id, started_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := s.db.Exec(q, id, name, dir, task, mode, model, groupName, windowID, sessionID, startedAt)
+		(id, name, dir, task, mode, model, host, group_name, window_id, session_id, started_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := s.db.Exec(q, id, name, dir, task, mode, model, host, groupName, windowID, sessionID, startedAt)
 	return err
 }
 
 // All returns all persisted instance rows.
 func (s *Store) All() ([]instance.StoreRow, error) {
-	const q = `SELECT id, name, dir, task, mode, model, group_name, window_id, session_id, started_at FROM instances`
+	const q = `SELECT id, name, dir, task, mode, model, host, group_name, window_id, session_id, started_at FROM instances`
 	rows, err := s.db.Query(q)
 	if err != nil {
 		return nil, err
@@ -169,7 +172,7 @@ func (s *Store) All() ([]instance.StoreRow, error) {
 	var out []instance.StoreRow
 	for rows.Next() {
 		var r instance.StoreRow
-		if err := rows.Scan(&r.ID, &r.Name, &r.Dir, &r.Task, &r.Mode, &r.Model, &r.GroupName, &r.WindowID, &r.SessionID, &r.StartedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.Dir, &r.Task, &r.Mode, &r.Model, &r.Host, &r.GroupName, &r.WindowID, &r.SessionID, &r.StartedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

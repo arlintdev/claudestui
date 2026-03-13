@@ -228,54 +228,33 @@ func readStateFromFile(path string) (string, instance.Status) {
 
 // statusFromLines determines idle/running by scanning the last N JSONL lines.
 //
-// Logic: find the last assistant entry with a non-null stop_reason.
-//   - "end_turn" → idle (Claude finished, waiting for user)
-//   - "tool_use" → idle if no user entry follows (waiting for approval),
-//     running if a user entry follows (tool result sent, Claude processing)
-//   - No such entry found → running (Claude is streaming or just started)
+// Logic: find the last meaningful entry (skip noise like progress, system,
+// file-history-snapshot). Only idle when the last meaningful entry is an
+// assistant message with stop_reason "end_turn". Everything else — streaming
+// text, tool execution, tool results, user input — means something is
+// happening, so report running.
 func statusFromLines(lines []string) instance.Status {
-	// Walk backwards to find the last assistant with stop_reason
 	for i := len(lines) - 1; i >= 0; i-- {
 		var entry activityEntry
 		if err := json.Unmarshal([]byte(lines[i]), &entry); err != nil {
 			continue
 		}
 
-		if entry.Type == "assistant" && entry.Message != nil && entry.Message.StopReason != nil {
-			sr := *entry.Message.StopReason
-
-			if sr == "end_turn" {
-				return instance.StatusIdle
-			}
-
-			if sr == "tool_use" {
-				// Check if a user entry (tool_result) follows, AND then
-				// another assistant entry after that — means Claude is working.
-				// If just a user entry with no assistant after → still idle (tool executing).
-				hasUser := false
-				hasAssistantAfter := false
-				for j := i + 1; j < len(lines); j++ {
-					var next activityEntry
-					if json.Unmarshal([]byte(lines[j]), &next) != nil {
-						continue
-					}
-					if next.Type == "user" {
-						hasUser = true
-					}
-					if next.Type == "assistant" && hasUser {
-						hasAssistantAfter = true
-						break
-					}
-				}
-				if hasUser && hasAssistantAfter {
-					return instance.StatusRunning
-				}
-				return instance.StatusIdle
-			}
-
-			// Other stop reasons (shouldn't happen normally)
-			return instance.StatusRunning
+		// Skip noise entries that don't indicate conversation state
+		switch entry.Type {
+		case "progress", "system", "file-history-snapshot":
+			continue
 		}
+
+		// Only idle when Claude explicitly finished with end_turn
+		if entry.Type == "assistant" && entry.Message != nil &&
+			entry.Message.StopReason != nil && *entry.Message.StopReason == "end_turn" {
+			return instance.StatusIdle
+		}
+
+		// Any other meaningful entry (assistant streaming, tool_use,
+		// user tool_result, user text) means work is happening
+		return instance.StatusRunning
 	}
 
 	return instance.StatusRunning

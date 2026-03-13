@@ -215,10 +215,11 @@ func (l *ListView) View() string {
 	colName := 14
 	colStatus := 10
 	colMode := 8
+	colHost := 12
 	colCPU := 5
 	colMem := 7
 	colUp := 8
-	fixedCols := checkW + colName + colStatus + colMode + colCPU + colMem + colUp + 7 // 7 for spacing
+	fixedCols := checkW + colName + colStatus + colMode + colHost + colCPU + colMem + colUp + 8 // 8 for spacing
 	remaining := l.width - fixedCols
 	colDir := max(remaining*30/100, 12)
 	colActivity := max(remaining-colDir-1, 10) // -1 for spacing
@@ -228,16 +229,17 @@ func (l *ListView) View() string {
 	if hasSelection {
 		checkHeader = "    " // 4 chars to match checkbox column
 	}
-	header := fmt.Sprintf(" %s%-*s %-*s %-*s %-*s %-*s %*s %*s %-*s",
+	header := fmt.Sprintf(" %s%-*s %-*s %-*s %-*s %-*s %*s %*s %-*s %-*s",
 		checkHeader,
 		colName, "NAME",
 		colStatus, "STATUS",
 		colMode, "MODE",
+		colHost, "HOST",
 		colDir, "DIR",
-		colActivity, "ACTIVITY",
 		colCPU, "CPU",
 		colMem, "MEM",
 		colUp, "AGE",
+		colActivity, "ACTIVITY",
 	)
 	headerLine := l.theme.TableHeader.Width(l.width).Render(header)
 
@@ -284,16 +286,19 @@ func (l *ListView) View() string {
 			}
 		}
 
+		hostLabel := truncate(inst.HostLabel(), colHost)
+
 		// Use padRight for styled strings (status, mode) since ANSI codes
 		// break fmt.Sprintf width calculations.
 		row := " " + checkPrefix + padRight(truncate(inst.Name, colName), colName) + " " +
 			padRight(status, colStatus) + " " +
 			padRight(mode, colMode) + " " +
+			padRight(hostLabel, colHost) + " " +
 			padRight(dir, colDir) + " " +
-			padRight(act, colActivity) + " " +
 			fmt.Sprintf("%*s", colCPU, cpu) + " " +
 			fmt.Sprintf("%*s", colMem, mem) + " " +
-			fmt.Sprintf("%-*s", colUp, inst.Uptime())
+			fmt.Sprintf("%-*s", colUp, inst.Uptime()) + " " +
+			padRight(act, colActivity)
 
 		// Three-tier styling: cursor > multi-selected > normal
 		switch {

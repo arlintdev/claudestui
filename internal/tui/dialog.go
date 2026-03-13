@@ -9,6 +9,7 @@ import (
 
 	"github.com/arlintdev/claudes/internal/claude"
 	"github.com/arlintdev/claudes/internal/instance"
+	"github.com/arlintdev/claudes/internal/sshconfig"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -28,6 +29,7 @@ const (
 	DialogSessionPicker
 	DialogContextMenu
 	DialogGroupName
+	DialogUpdate
 )
 
 // Model choices for the selector.
@@ -52,6 +54,11 @@ type Dialog struct {
 	dangerous bool // start in dangerous mode
 	resume    bool // open with --resume (session picker)
 
+	// New instance: host selector + docker image input
+	hostChoices  []string         // e.g. ["local", "ssh:myhost", "docker"]
+	hostCur      int              // index into hostChoices
+	dockerImage  textinput.Model  // text input for docker image name
+
 	// New instance: directory completions
 	dirCompletions []string
 	dirCompIdx     int // -1 = not completing
@@ -75,6 +82,14 @@ type Dialog struct {
 	// Group name dialog
 	groupNameInput textinput.Model
 	groupTargetIDs []string // IDs to group
+
+	// Update dialog
+	updateCurrent    string // current version
+	updateAvailable  string // available version
+	updateURL        string // download URL
+	updateCur        int    // 0 = Update, 1 = Skip
+	updateDownloading bool  // true while downloading
+	updateErr        error  // download error
 }
 
 // menuItem represents a single context menu entry.
@@ -98,7 +113,7 @@ func NewDialog(theme Theme) Dialog {
 }
 
 // totalFields is the number of focusable fields in the new-instance form.
-const totalFields = 6 // name, dir, task, model, danger, resume
+const totalFields = 8 // name, dir, task, model, host, dockerImage, danger, resume
 
 // OpenNew opens the new instance side panel.
 func (d *Dialog) OpenNew() {
@@ -123,6 +138,19 @@ func (d *Dialog) OpenNew() {
 	d.inputs[2] = textinput.New()
 	d.inputs[2].Placeholder = "initial task (optional)"
 	d.inputs[2].CharLimit = 500
+
+	// Build host choices: local + SSH hosts + docker
+	d.hostChoices = []string{"local"}
+	for _, h := range sshconfig.ParseHosts() {
+		d.hostChoices = append(d.hostChoices, "ssh:"+h)
+	}
+	d.hostChoices = append(d.hostChoices, "docker")
+	d.hostCur = 0
+
+	d.dockerImage = textinput.New()
+	d.dockerImage.Placeholder = "image:tag"
+	d.dockerImage.CharLimit = 200
+	d.dockerImage.SetValue(defaultDockerImage)
 }
 
 // OpenConfirmDelete opens the inline delete confirmation in the footer.
@@ -230,6 +258,17 @@ func (d *Dialog) GroupTargetIDs() []string {
 	return d.groupTargetIDs
 }
 
+// OpenUpdate opens the update available dialog.
+func (d *Dialog) OpenUpdate(current, available, downloadURL string) {
+	d.Kind = DialogUpdate
+	d.updateCurrent = current
+	d.updateAvailable = available
+	d.updateURL = downloadURL
+	d.updateCur = 0
+	d.updateDownloading = false
+	d.updateErr = nil
+}
+
 // Close dismisses the dialog.
 func (d *Dialog) Close() {
 	d.Kind = DialogNone
@@ -242,6 +281,9 @@ func (d *Dialog) Close() {
 	d.dirCompIdx = -1
 	d.menuItems = nil
 	d.groupTargetIDs = nil
+	d.updateURL = ""
+	d.updateDownloading = false
+	d.updateErr = nil
 }
 
 // Target returns the target instance name (for confirm dialogs).
@@ -250,11 +292,18 @@ func (d *Dialog) Target() string {
 }
 
 // NewInstanceValues returns values from the new dialog inputs.
-func (d *Dialog) NewInstanceValues() (name, dir, task, model string, dangerous, resume bool) {
+func (d *Dialog) NewInstanceValues() (name, dir, task, model, host string, dangerous, resume bool) {
 	if len(d.inputs) < 3 {
 		return
 	}
-	return d.inputs[0].Value(), d.inputs[1].Value(), d.inputs[2].Value(), modelChoices[d.modelCur], d.dangerous, d.resume
+	host = d.hostChoices[d.hostCur]
+	if host == "docker" {
+		img := d.dockerImage.Value()
+		if img != "" {
+			host = "docker:" + img
+		}
+	}
+	return d.inputs[0].Value(), d.inputs[1].Value(), d.inputs[2].Value(), modelChoices[d.modelCur], host, d.dangerous, d.resume
 }
 
 // FilterValue returns the current filter text.
@@ -293,6 +342,29 @@ func (d *Dialog) Update(msg tea.Msg) tea.Cmd {
 		return d.updateContextMenu(msg)
 	case DialogGroupName:
 		return d.updateGroupName(msg)
+	case DialogUpdate:
+		return d.updateUpdateDialog(msg)
+	}
+	return nil
+}
+
+func (d *Dialog) updateUpdateDialog(msg tea.Msg) tea.Cmd {
+	if d.updateDownloading {
+		return nil // ignore input while downloading
+	}
+	if msg, ok := msg.(tea.KeyMsg); ok {
+		switch msg.String() {
+		case "left", "h":
+			if d.updateCur > 0 {
+				d.updateCur--
+			}
+		case "right", "l":
+			if d.updateCur < 1 {
+				d.updateCur++
+			}
+		case "tab":
+			d.updateCur = (d.updateCur + 1) % 2
+		}
 	}
 	return nil
 }
@@ -323,8 +395,30 @@ func (d *Dialog) updateNew(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 
-		// Danger toggle: space to toggle
+		// Host selector: left/right when focused on host field
 		if d.focus == 4 {
+			switch msg.String() {
+			case "left", "h":
+				if d.hostCur > 0 {
+					d.hostCur--
+				}
+			case "right", "l":
+				if d.hostCur < len(d.hostChoices)-1 {
+					d.hostCur++
+				}
+			}
+			return nil
+		}
+
+		// Docker image text input
+		if d.focus == 5 {
+			var cmd tea.Cmd
+			d.dockerImage, cmd = d.dockerImage.Update(msg)
+			return cmd
+		}
+
+		// Danger toggle: space to toggle
+		if d.focus == 6 {
 			if msg.String() == " " {
 				d.dangerous = !d.dangerous
 			}
@@ -332,7 +426,7 @@ func (d *Dialog) updateNew(msg tea.Msg) tea.Cmd {
 		}
 
 		// Resume toggle: space to toggle
-		if d.focus == 5 {
+		if d.focus == 7 {
 			if msg.String() == " " {
 				d.resume = !d.resume
 			}
@@ -351,7 +445,7 @@ func (d *Dialog) updateNew(msg tea.Msg) tea.Cmd {
 		}
 	}
 
-	// Only update text inputs when focus is on a text field
+	// Only update text inputs when focus is on a text field (0-2)
 	if d.focus < 3 {
 		var cmd tea.Cmd
 		d.inputs[d.focus], cmd = d.inputs[d.focus].Update(msg)
@@ -364,9 +458,19 @@ func (d *Dialog) advanceFocus(delta int) {
 	if d.focus < 3 {
 		d.inputs[d.focus].Blur()
 	}
+	if d.focus == 5 {
+		d.dockerImage.Blur()
+	}
 	d.focus = (d.focus + delta + totalFields) % totalFields
+	// Skip dockerImage field (5) when host is not "docker"
+	if d.focus == 5 && d.hostChoices[d.hostCur] != "docker" {
+		d.focus = (d.focus + delta + totalFields) % totalFields
+	}
 	if d.focus < 3 {
 		d.inputs[d.focus].Focus()
+	}
+	if d.focus == 5 {
+		d.dockerImage.Focus()
 	}
 	d.dirCompletions = nil
 	d.dirCompIdx = -1
@@ -441,6 +545,10 @@ func expandHome(path string) string {
 	}
 	return path
 }
+
+// defaultDockerImage is the default image pre-filled for docker instances.
+// Uses node:20 since claude-code installs via npm/npx.
+const defaultDockerImage = "node:20"
 
 func contractHome(path string) string {
 	home, _ := os.UserHomeDir()
@@ -539,6 +647,8 @@ func (d *Dialog) View() string {
 		return d.viewContextMenu()
 	case DialogGroupName:
 		return d.viewGroupName()
+	case DialogUpdate:
+		return d.viewUpdate()
 	default:
 		return ""
 	}
@@ -610,9 +720,45 @@ func (d *Dialog) viewNew() string {
 	rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Center, modelParts...))
 	rows = append(rows, "")
 
+	// Host selector
+	hostLabel := d.theme.Label.Render("Host")
+	if d.focus == 4 {
+		hostLabel = d.theme.Bold.Render("Host")
+	}
+	rows = append(rows, hostLabel)
+
+	var hostParts []string
+	for i, choice := range d.hostChoices {
+		label := choice
+		if strings.HasPrefix(label, "ssh:") {
+			label = label[4:] // strip "ssh:" prefix for display
+		}
+		if i == d.hostCur {
+			hostParts = append(hostParts, d.theme.Bold.
+				Background(d.theme.Selected.GetBackground()).
+				Padding(0, 1).
+				Render(label))
+		} else {
+			hostParts = append(hostParts, d.theme.Muted.Padding(0, 1).Render(label))
+		}
+	}
+	rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Center, hostParts...))
+	rows = append(rows, "")
+
+	// Docker image input (only when host is "docker")
+	if d.hostChoices[d.hostCur] == "docker" {
+		imgLabel := d.theme.Label.Render("Image")
+		if d.focus == 5 {
+			imgLabel = d.theme.Bold.Render("Image")
+		}
+		rows = append(rows, imgLabel)
+		rows = append(rows, d.dockerImage.View())
+		rows = append(rows, "")
+	}
+
 	// Danger toggle
 	dangerLabel := d.theme.Label.Render("Mode")
-	if d.focus == 4 {
+	if d.focus == 6 {
 		dangerLabel = d.theme.Bold.Render("Mode")
 	}
 	rows = append(rows, dangerLabel)
@@ -625,7 +771,7 @@ func (d *Dialog) viewNew() string {
 
 	// Resume toggle
 	resumeLabel := d.theme.Label.Render("Resume")
-	if d.focus == 5 {
+	if d.focus == 7 {
 		resumeLabel = d.theme.Bold.Render("Resume")
 	}
 	rows = append(rows, resumeLabel)
@@ -639,9 +785,9 @@ func (d *Dialog) viewNew() string {
 	// Hints
 	hint := d.theme.Muted.Render("Tab next  Enter create  Esc cancel")
 	switch d.focus {
-	case 3:
+	case 3, 4:
 		hint = d.theme.Muted.Render("←/→ select  Tab next  Enter create")
-	case 4, 5:
+	case 6, 7:
 		hint = d.theme.Muted.Render("Space toggle  Tab next  Enter create")
 	}
 	rows = append(rows, hint)
@@ -772,4 +918,49 @@ func (d *Dialog) viewContextMenu() string {
 		append([]string{title, ""}, rows...)...,
 	)
 	return d.theme.Dialog.Width(24).Render(content)
+}
+
+func (d *Dialog) viewUpdate() string {
+	title := d.theme.Bold.Render("Update Available")
+
+	version := fmt.Sprintf("%s → %s", d.updateCurrent, d.updateAvailable)
+
+	if d.updateDownloading {
+		content := lipgloss.JoinVertical(lipgloss.Left,
+			title, "", version, "",
+			d.theme.Bold.Render("Downloading..."),
+		)
+		return d.theme.Dialog.Width(44).Render(content)
+	}
+
+	if d.updateErr != nil {
+		content := lipgloss.JoinVertical(lipgloss.Left,
+			title, "", version, "",
+			d.theme.ErrorFlash.Render("Error: "+d.updateErr.Error()), "",
+			d.theme.Muted.Render("Esc: close"),
+		)
+		return d.theme.Dialog.Width(44).Render(content)
+	}
+
+	// Two options: Update & Restart, Skip
+	options := []string{"Update & Restart", "Skip"}
+	var parts []string
+	for i, opt := range options {
+		if i == d.updateCur {
+			parts = append(parts, d.theme.Bold.
+				Background(d.theme.Selected.GetBackground()).
+				Padding(0, 2).
+				Render(opt))
+		} else {
+			parts = append(parts, d.theme.Muted.Padding(0, 2).Render(opt))
+		}
+	}
+	buttons := lipgloss.JoinHorizontal(lipgloss.Center, parts...)
+
+	hint := d.theme.Muted.Render("←/→ select  Enter confirm  Esc skip")
+
+	content := lipgloss.JoinVertical(lipgloss.Center,
+		title, "", version, "", buttons, "", hint,
+	)
+	return d.theme.Dialog.Width(44).Render(content)
 }

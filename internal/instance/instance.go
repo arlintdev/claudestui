@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -60,6 +61,7 @@ type Instance struct {
 	Dir       string
 	Task      string
 	Model     string // claude model alias (e.g. "sonnet", "opus")
+	Host      string // "" or "local" = local, "ssh:<hostname>", "docker:<image>"
 	GroupName string // persistent group membership
 	Status    Status
 	Mode      Mode
@@ -90,9 +92,29 @@ func (i *Instance) Uptime() string {
 	}
 }
 
+// HostLabel returns a display label for the host field.
+// Returns "local" for local instances, the SSH hostname, or "docker".
+func (i *Instance) HostLabel() string {
+	switch {
+	case i.Host == "" || i.Host == "local":
+		return "local"
+	case strings.HasPrefix(i.Host, "ssh:"):
+		return i.Host[4:]
+	case strings.HasPrefix(i.Host, "docker:"):
+		return "docker"
+	default:
+		return i.Host
+	}
+}
+
+// IsRemote returns true if the instance runs on a remote host or in a container.
+func (i *Instance) IsRemote() bool {
+	return i.Host != "" && i.Host != "local"
+}
+
 // Store is the persistence interface for instances.
 type Store interface {
-	Save(id, name, dir, task, mode, model, groupName, windowID, sessionID, startedAt string) error
+	Save(id, name, dir, task, mode, model, host, groupName, windowID, sessionID, startedAt string) error
 	All() ([]StoreRow, error)
 	Delete(id string) error
 }
@@ -105,6 +127,7 @@ type StoreRow struct {
 	Task      string
 	Mode      string
 	Model     string
+	Host      string
 	GroupName string
 	WindowID  string
 	SessionID string
@@ -259,6 +282,7 @@ func (m *Manager) LoadAll() {
 			Dir:       r.Dir,
 			Task:      r.Task,
 			Model:     r.Model,
+			Host:      r.Host,
 			GroupName: r.GroupName,
 			Mode:      mode,
 			WindowID:  r.WindowID,
@@ -325,5 +349,5 @@ func (m *Manager) persist(inst *Instance) {
 		startedAt = inst.StartedAt.Format(time.RFC3339)
 	}
 	_ = m.store.Save(inst.ID, inst.Name, inst.Dir, inst.Task, inst.Mode.String(),
-		inst.Model, inst.GroupName, inst.WindowID, inst.SessionID, startedAt)
+		inst.Model, inst.Host, inst.GroupName, inst.WindowID, inst.SessionID, startedAt)
 }
