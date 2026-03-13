@@ -27,7 +27,7 @@ type ListView struct {
 
 const cardRows = 5 // top border (with title+status) + 3 content lines + bottom border
 
-const robotWidth = 4 // each robot pose is 4 chars wide
+const robotWidth = 6 // each robot pose is 6 chars wide
 
 // Tick advances the animation frame counter.
 func (l *ListView) Tick() {
@@ -35,117 +35,80 @@ func (l *ListView) Tick() {
 }
 
 // robotFrames defines animation frames for each activity/status.
-// Each entry is a slice of [3]string frames that cycle.
+// Each entry is a slice of [3]string frames that cycle. All frames are 6 chars wide.
 var robotFrames = map[string][][3]string{
 	"thinking": {
-		{`[..]`, `-[]-`, ` ╨╨ `},
-		{`[. ]`, `-[]-`, ` ╨╨ `},
-		{`[..]`, `-[]-`, ` ╨╨ `},
-		{`[ .]`, `-[]-`, ` ╨╨ `},
+		{` [..] `, ` -[]- `, `  ╨╨  `},
+		{` [. ] `, ` -[]- `, `  ╨╨  `},
+		{` [..] `, ` -[]- `, `  ╨╨  `},
+		{` [ .] `, ` -[]- `, `  ╨╨  `},
 	},
 	"reading": {
-		{`[°°]`, `-[]-`, ` ╨╨ `},
-		{`[°°]`, `-[]+`, ` ╨╨ `},
-		{`[°°]`, `-[]-`, ` ╨╨ `},
-		{`[°°]`, `+[]-`, ` ╨╨ `},
+		{` [°°] `, ` -[]-╗`, `  ╨╨  `},
+		{` [°°] `, ` -[]- `, `  ╨╨  `},
+		{` [°°] `, `╔-[]- `, `  ╨╨  `},
+		{` [°°] `, ` -[]- `, `  ╨╨  `},
 	},
 	"writing": {
-		{`[..]`, `-[]╗`, ` ╨╨ `},
-		{`[..]`, `-[] `, ` ╨╨ `},
-		{`[..]`, `-[]╗`, ` ╨╨ `},
-		{`[..]`, `-[]╝`, ` ╨╨ `},
+		{` [..] `, ` -[]╗ `, `  ╨╨  `},
+		{` [..] `, ` -[]-╗`, `  ╨╨  `},
+		{` [..] `, ` -[]╝ `, `  ╨╨  `},
+		{` [..] `, ` -[]-╝`, `  ╨╨  `},
 	},
 	"running": {
-		{`\../`, `-[]-`, `╨  ╨`},
-		{`[..]`, `-[]-`, ` ╨╨ `},
-		{`\../`, `-[]-`, `╨  ╨`},
-		{`[..]`, `\[]/`, ` ╨╨ `},
+		{` \../ `, ` -[]- `, ` ╨  ╨ `},
+		{` [..] `, `/-[]-\`, `  ╨╨  `},
+		{` \../ `, ` -[]- `, ` ╨  ╨ `},
+		{` [..] `, `\-[]-/`, `  ╨╨  `},
 	},
 	"searching": {
-		{`[¬¬]`, `-[]-`, ` ╨╨ `},
-		{`[¬ ]`, `-[]-`, `╨ ╨ `},
-		{`[¬¬]`, `-[]-`, ` ╨╨ `},
-		{`[ ¬]`, `-[]-`, ` ╨ ╨`},
+		{` [¬¬] `, ` -[]- `, `  ╨╨  `},
+		{` [¬ ] `, ` -[]- `, ` ╨ ╨  `},
+		{` [¬¬] `, ` -[]- `, `  ╨╨  `},
+		{` [ ¬] `, ` -[]- `, `  ╨ ╨ `},
 	},
 	"browsing": {
-		{`[..]`, `╔[]-`, ` ╨╨ `},
-		{`[..]`, `-[]-`, ` ╨╨ `},
-		{`[..]`, `-[]╗`, ` ╨╨ `},
-		{`[..]`, `-[]-`, ` ╨╨ `},
+		{` [..] `, `╔-[]- `, `  ╨╨  `},
+		{` [oo] `, ` -[]- `, `  ╨╨  `},
+		{` [..] `, ` -[]-╗`, `  ╨╨  `},
+		{` [oo] `, ` -[]- `, `  ╨╨  `},
 	},
 	"spawning": {
-		{`[..]`, `-[]+`, ` ╨╨ `},
-		{`[..]`, `-[] `, ` ╨╨ `},
-		{`[..]`, `-[]-`, ` ╨╨.`},
-		{`[..]`, `-[]-`, ` ╨╨ `},
+		{` [..] `, ` -[]-+`, `  ╨╨  `},
+		{` [..] `, ` -[]- `, `  ╨╨ .`},
+		{` [..] `, ` -[]- `, `  ╨╨  `},
+		{` [..] `, ` -[]-+`, `  ╨╨  `},
 	},
 	"waiting": {
-		{`[..]`, ` [] `, ` ╨╨ `},
-		{`[  ]`, ` [] `, ` ╨╨ `},
-		{`[..]`, ` [] `, ` ╨╨ `},
-		{`[  ]`, ` [] `, ` ╨╨ `},
+		{` [..] `, `  []  `, `  ╨╨  `},
+		{` [  ] `, `  []  `, `  ╨╨  `},
+		{` [..] `, `  []  `, `  ╨╨  `},
+		{` [  ] `, `  []  `, `  ╨╨  `},
 	},
 	"idle": {
-		{`[..]`, ` [] `, ` ╨╨ `},
-		{`[..]`, ` [] `, ` ╨╨ `},
-		{`[--]`, ` [] `, ` ╨╨ `},
-		{`[..]`, ` [] `, ` ╨╨ `},
+		{` [..] `, `  []° `, `  ╨╨  `},
+		{` [..] `, `  []°°`, `  ╨╨  `},
+		{` [--] `, `  []  `, `  ╨╨  `},
+		{` [..] `, `  []° `, `  ╨╨  `},
 	},
 	"error": {
-		{`[!!]`, `\[]/`, ` ╨╨ `},
-		{`[!!]`, `-[]-`, `╨  ╨`},
-		{`[!!]`, `\[]/`, ` ╨╨ `},
-		{`[!!]`, `-[]-`, `╨  ╨`},
+		{`![!!]!`, `\-[]-/`, ` ╨  ╨ `},
+		{` [!!] `, `/-[]-\`, `  ╨╨  `},
+		{`![!!]!`, `\-[]-/`, ` ╨  ╨ `},
+		{` [!!] `, `/-[]-\`, `  ╨╨  `},
 	},
 	"stopped": {
-		{`[__]`, ` [] `, ` ╨╨ `},
+		{` [__] `, `  []  `, `  ╨╨  `},
 	},
 }
 
-// robotPose returns the current animation frame and style for a robot.
-func (l *ListView) robotPose(inst *instance.Instance) ([3]string, lipgloss.Style) {
-	var key string
-	var style lipgloss.Style
-
-	if inst.Status == instance.StatusRunning {
-		if st, ok := l.activityStates[inst.ID]; ok && st.Kind != claude.ActivityNone {
-			switch st.Kind {
-			case claude.ActivityThinking:
-				key, style = "thinking", l.theme.ActivityThinking
-			case claude.ActivityReading:
-				key, style = "reading", l.theme.ActivityReading
-			case claude.ActivityWriting:
-				key, style = "writing", l.theme.ActivityWriting
-			case claude.ActivityRunning:
-				key, style = "running", l.theme.ActivityRunning
-			case claude.ActivitySearching:
-				key, style = "searching", l.theme.ActivitySearching
-			case claude.ActivityBrowsing:
-				key, style = "browsing", l.theme.ActivityBrowsing
-			case claude.ActivitySpawning:
-				key, style = "spawning", l.theme.ActivitySpawning
-			case claude.ActivityWaiting:
-				key, style = "waiting", l.theme.ActivityWaiting
-			default:
-				key, style = "running", l.theme.StatusRunning
-			}
-		} else {
-			key, style = "running", l.theme.StatusRunning
-		}
-	} else {
-		switch inst.Status {
-		case instance.StatusIdle:
-			key, style = "idle", l.theme.StatusIdle
-		case instance.StatusError:
-			key, style = "error", l.theme.StatusError
-		default:
-			key, style = "stopped", l.theme.StatusStopped
-		}
-	}
-
+// robotFrame returns the current animation frame for a given robot key.
+func (l *ListView) robotFrame(key string) [3]string {
 	frames := robotFrames[key]
-	frame := frames[l.animFrame%len(frames)]
-	return frame, style
+	if len(frames) == 0 {
+		frames = robotFrames["stopped"]
+	}
+	return frames[l.animFrame%len(frames)]
 }
 
 // NewListView creates a new list view.
@@ -437,7 +400,7 @@ func (l *ListView) View() string {
 		rc := bc
 
 		// Top border: ╭─ name ──── ● Status  5m ─╮
-		dot, statusText, age := l.statusInfo(inst)
+		dot, statusText, age, rKey, rStyle := l.statusInfo(inst)
 		nameStr := l.theme.Bold.Render(truncate(inst.Name, contentW/3))
 
 		leftPart := bc.Render("╭─ ") + nameStr + bc.Render(" ")
@@ -451,7 +414,8 @@ func (l *ListView) View() string {
 		// Content lines (3 lines) with robot on the right
 		vBarL := bc.Render("│")
 		vBarR := rc.Render("│")
-		pose, poseStyle := l.robotPose(inst)
+		pose := l.robotFrame(rKey)
+		poseStyle := rStyle
 		textW := contentW - robotWidth - 1 // leave room for robot + gap
 		contentLines := []string{
 			l.cardLine2(inst, textW),
@@ -509,25 +473,54 @@ func (l *ListView) View() string {
 	return strings.Join(visible, "\n")
 }
 
-// statusInfo returns the colored dot, status label, and age for an instance.
-func (l *ListView) statusInfo(inst *instance.Instance) (dot, status, age string) {
+// statusInfo returns the colored dot, status label, age, and robot key for an instance.
+func (l *ListView) statusInfo(inst *instance.Instance) (dot, status, age, robotKey string, robotStyle lipgloss.Style) {
 	age = inst.Uptime()
 	state := l.activityStates[inst.ID]
 	switch {
-	case inst.Status == instance.StatusRunning || inst.Status == instance.StatusIdle:
+	case inst.Status == instance.StatusIdle:
+		dot = l.theme.StatusIdle.Render("●")
+		status = l.theme.StatusIdle.Render("idle")
+		robotKey, robotStyle = "idle", l.theme.StatusIdle
+	case inst.Status == instance.StatusRunning:
 		if state != nil && state.Kind != claude.ActivityNone {
-			// Active activity from JSONL — show what Claude is doing
 			kindStyle := l.activityKindStyle(state.Kind)
 			dot = kindStyle.Render("●")
 			status = kindStyle.Render(state.Kind.String())
+			robotStyle = kindStyle
+			switch state.Kind {
+			case claude.ActivityThinking:
+				robotKey = "thinking"
+			case claude.ActivityReading:
+				robotKey = "reading"
+			case claude.ActivityWriting:
+				robotKey = "writing"
+			case claude.ActivityRunning:
+				robotKey = "running"
+			case claude.ActivitySearching:
+				robotKey = "searching"
+			case claude.ActivityBrowsing:
+				robotKey = "browsing"
+			case claude.ActivitySpawning:
+				robotKey = "spawning"
+			case claude.ActivityWaiting:
+				robotKey = "waiting"
+			default:
+				robotKey = "running"
+			}
 		} else {
-			// No activity yet (new instance) or idle — show idle
 			dot = l.theme.StatusIdle.Render("●")
 			status = l.theme.StatusIdle.Render("idle")
+			robotKey, robotStyle = "idle", l.theme.StatusIdle
 		}
+	case inst.Status == instance.StatusError:
+		dot = l.statusDot(inst.Status)
+		status = l.styleStatus(inst.Status)
+		robotKey, robotStyle = "error", l.theme.StatusError
 	default:
 		dot = l.statusDot(inst.Status)
 		status = l.styleStatus(inst.Status)
+		robotKey, robotStyle = "stopped", l.theme.StatusStopped
 	}
 	return
 }
