@@ -1,6 +1,6 @@
 package tui
 
-import "github.com/charmbracelet/bubbles/key"
+import "charm.land/bubbles/v2/key"
 
 // KeyMap defines all key bindings for the app.
 type KeyMap struct {
@@ -28,12 +28,12 @@ type KeyMap struct {
 func DefaultKeyMap() KeyMap {
 	return KeyMap{
 		Up: key.NewBinding(
-			key.WithKeys("k", "up"),
-			key.WithHelp("↑/k", "up"),
+			key.WithKeys("k", "up", "ctrl+p"),
+			key.WithHelp("↑/k/^p", "up"),
 		),
 		Down: key.NewBinding(
-			key.WithKeys("j", "down"),
-			key.WithHelp("↓/j", "down"),
+			key.WithKeys("j", "down", "ctrl+n"),
+			key.WithHelp("↓/j/^n", "down"),
 		),
 		New: key.NewBinding(
 			key.WithKeys("n"),
@@ -84,7 +84,7 @@ func DefaultKeyMap() KeyMap {
 			key.WithHelp("tab", "next field"),
 		),
 		Select: key.NewBinding(
-			key.WithKeys(" "),
+			key.WithKeys("space"),
 			key.WithHelp("Space", "toggle select"),
 		),
 		SelectAll: key.NewBinding(

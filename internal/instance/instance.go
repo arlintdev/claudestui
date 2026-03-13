@@ -65,9 +65,8 @@ type Instance struct {
 	GroupName string // persistent group membership
 	Status    Status
 	Mode      Mode
-	WindowID  string // tmux window identifier
 	SessionID string // Claude session ID for targeted resume
-	PanePID   string // tmux pane PID for resource tracking
+	DaemonPID int    // OS PID from daemon, for CPU/mem tracking via ps
 	StartedAt time.Time
 	CPU       float64 // current CPU% from ps
 	MemKB     uint64  // current RSS in KB from ps
@@ -114,7 +113,7 @@ func (i *Instance) IsRemote() bool {
 
 // Store is the persistence interface for instances.
 type Store interface {
-	Save(id, name, dir, task, mode, model, host, groupName, windowID, sessionID, startedAt string) error
+	Save(id, name, dir, task, mode, model, host, groupName, sessionID, startedAt string) error
 	All() ([]StoreRow, error)
 	Delete(id string) error
 }
@@ -129,7 +128,6 @@ type StoreRow struct {
 	Model     string
 	Host      string
 	GroupName string
-	WindowID  string
 	SessionID string
 	StartedAt string
 }
@@ -285,7 +283,6 @@ func (m *Manager) LoadAll() {
 			Host:      r.Host,
 			GroupName: r.GroupName,
 			Mode:      mode,
-			WindowID:  r.WindowID,
 			SessionID: r.SessionID,
 			StartedAt: startedAt,
 			Status:    StatusStopped, // will be reconciled
@@ -349,5 +346,5 @@ func (m *Manager) persist(inst *Instance) {
 		startedAt = inst.StartedAt.Format(time.RFC3339)
 	}
 	_ = m.store.Save(inst.ID, inst.Name, inst.Dir, inst.Task, inst.Mode.String(),
-		inst.Model, inst.Host, inst.GroupName, inst.WindowID, inst.SessionID, startedAt)
+		inst.Model, inst.Host, inst.GroupName, inst.SessionID, startedAt)
 }

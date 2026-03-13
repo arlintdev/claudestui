@@ -8,26 +8,21 @@ import (
 	"strings"
 	"time"
 
+	"github.com/arlintdev/claudes/internal/daemon"
 	"github.com/arlintdev/claudes/internal/instance"
-	"github.com/arlintdev/claudes/internal/tmux"
 )
 
-// Launcher manages Claude Code instances via tmux.
+// Launcher manages Claude Code instances via the daemon.
 type Launcher struct {
-	tmux     *tmux.Client
+	daemon   *daemon.Client
 	manager  *instance.Manager
 	Activity *ActivityWatcher
-
-	// PreviewingID is the instance currently shown in the dashboard preview pane.
-	// Its tmux window has been merged into the dashboard, so RefreshStatuses
-	// must skip the window-based lookup for this instance.
-	PreviewingID string
 }
 
 // NewLauncher creates a new Claude launcher.
-func NewLauncher(tc *tmux.Client, mgr *instance.Manager) *Launcher {
+func NewLauncher(dc *daemon.Client, mgr *instance.Manager) *Launcher {
 	aw, _ := NewActivityWatcher() // nil-safe — Get/All return "" / empty map
-	return &Launcher{tmux: tc, manager: mgr, Activity: aw}
+	return &Launcher{daemon: dc, manager: mgr, Activity: aw}
 }
 
 // LaunchOpts configures a new Claude instance.
@@ -40,6 +35,8 @@ type LaunchOpts struct {
 	Dangerous bool
 	Resume    bool
 	SessionID string // specific session to resume
+	Cols      int    // terminal width
+	Rows      int    // terminal height
 }
 
 // BuildCommand constructs the claude CLI command string.
@@ -63,7 +60,6 @@ func BuildCommand(opts LaunchOpts) string {
 }
 
 // wrapCommand wraps a base command for remote execution based on host type.
-// For docker, dir is mounted as /work inside the container.
 func wrapCommand(baseCmd, host, dir, instID string) string {
 	switch {
 	case host == "" || host == "local":
@@ -72,12 +68,9 @@ func wrapCommand(baseCmd, host, dir, instID string) string {
 		return fmt.Sprintf("ssh -t %s 'bash -lc %q'", host[4:], baseCmd)
 	case strings.HasPrefix(host, "docker:"):
 		image := host[7:]
-		// Replace bare "claude" with "npx -y @anthropic-ai/claude-code" for
-		// generic images (like node:20) that don't have claude pre-installed.
 		dockerCmd := strings.Replace(baseCmd, "claude", "npx -y @anthropic-ai/claude-code", 1)
 		name := "claudes-" + instID
 
-		// Mount ~/.claude credentials into the container (read-only)
 		var creds string
 		if home, err := os.UserHomeDir(); err == nil {
 			claudeDir := filepath.Join(home, ".claude")
@@ -99,17 +92,34 @@ func wrapCommand(baseCmd, host, dir, instID string) string {
 	}
 }
 
-// Launch creates a new Claude instance in a tmux window.
+// Launch creates a new Claude instance via the daemon.
 func (l *Launcher) Launch(opts LaunchOpts) (*instance.Instance, error) {
 	id := instance.GenerateID()
 	cmd := wrapCommand(BuildCommand(opts), opts.Host, opts.Dir, id)
 
-	// Remote instances don't use a local CWD for tmux
 	dir := opts.Dir
 	if opts.Host != "" && opts.Host != "local" {
 		dir = ""
 	}
-	windowID, err := l.tmux.NewWindow(id, dir, cmd)
+	if dir == "" {
+		dir, _ = os.UserHomeDir()
+	}
+
+	cols, rows := opts.Cols, opts.Rows
+	if cols <= 0 {
+		cols = 120
+	}
+	if rows <= 0 {
+		rows = 40
+	}
+
+	pid, err := l.daemon.Launch(daemon.LaunchParams{
+		ID:      id,
+		Command: cmd,
+		Dir:     dir,
+		Cols:    cols,
+		Rows:    rows,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("launch %s: %w", opts.Name, err)
 	}
@@ -128,12 +138,9 @@ func (l *Launcher) Launch(opts LaunchOpts) (*instance.Instance, error) {
 		Host:      opts.Host,
 		Status:    instance.StatusRunning,
 		Mode:      mode,
-		WindowID:  windowID,
+		DaemonPID: pid,
 		StartedAt: time.Now(),
 	}
-	l.tmux.SetWindowOption(windowID, "claudes-mode", mode.String())
-	l.tmux.SetRemainOnExit(windowID)
-	l.tmux.SetPaneTitle(windowID, opts.Name)
 	l.manager.Add(inst)
 	if l.Activity != nil && !inst.IsRemote() {
 		l.Activity.Watch(inst.ID, inst.Dir, "")
@@ -151,8 +158,7 @@ func removeDockerContainer(instID string) {
 	_ = exec.Command("docker", "rm", "-f", "claudes-"+instID).Run()
 }
 
-// Kill stops a Claude instance (kills tmux window) but keeps it in memory and DB
-// so it can be resumed later. Captures the active session ID before killing.
+// Kill stops a Claude instance but keeps it in memory and DB for resume.
 func (l *Launcher) Kill(id string) error {
 	inst := l.manager.Get(id)
 	if inst == nil {
@@ -164,30 +170,28 @@ func (l *Launcher) Kill(id string) error {
 			inst.SessionID = sid
 		}
 	}
-	// Stop docker container before killing tmux window
+	// Stop docker container
 	if strings.HasPrefix(inst.Host, "docker:") {
 		stopDockerContainer(id)
 	}
-	_ = l.tmux.KillWindow(inst.WindowID)
+	_ = l.daemon.Kill(id)
 	inst.Status = instance.StatusStopped
-	inst.WindowID = ""
+	inst.DaemonPID = 0
 	l.manager.SaveInstance(id)
 	return nil
 }
 
-// Delete permanently removes a Claude instance — kills tmux window, removes from
-// memory and the database.
+// Delete permanently removes a Claude instance.
 func (l *Launcher) Delete(id string) error {
 	inst := l.manager.Get(id)
 	if inst == nil {
 		return fmt.Errorf("instance %q not found", id)
 	}
-	// Force-remove docker container
 	if strings.HasPrefix(inst.Host, "docker:") {
 		removeDockerContainer(id)
 	}
-	if inst.WindowID != "" {
-		_ = l.tmux.KillWindow(inst.WindowID)
+	if inst.DaemonPID != 0 {
+		_ = l.daemon.Kill(id)
 	}
 	if l.Activity != nil {
 		l.Activity.Unwatch(id)
@@ -196,41 +200,56 @@ func (l *Launcher) Delete(id string) error {
 	return nil
 }
 
-// Resume restarts a stopped instance. Uses the stored SessionID if available,
-// otherwise falls back to plain --resume (most recent session).
-func (l *Launcher) Resume(id string) error {
+// Resume restarts a stopped instance.
+func (l *Launcher) Resume(id string, cols, rows int) error {
 	inst := l.manager.Get(id)
 	if inst == nil {
 		return fmt.Errorf("instance %q not found", id)
 	}
 
-	// Kill old window — by ID if we have it, plus by name (=instance ID) to catch strays.
-	_ = l.tmux.KillWindow(inst.WindowID)
-	l.tmux.KillWindowByName(inst.ID)
+	// Kill existing daemon process if any
+	_ = l.daemon.Kill(id)
 
 	opts := LaunchOpts{
 		Name:      inst.Name,
 		Dir:       inst.Dir,
 		Model:     inst.Model,
 		Dangerous: inst.Mode == instance.ModeDanger,
-		Resume:    true, // always use plain --resume so the user can pick the session
+		Resume:    inst.SessionID == "",
+		SessionID: inst.SessionID,
+		Cols:      cols,
+		Rows:      rows,
 	}
 	cmd := wrapCommand(BuildCommand(opts), inst.Host, inst.Dir, inst.ID)
 	dir := opts.Dir
 	if inst.IsRemote() {
 		dir = ""
 	}
-	windowID, err := l.tmux.NewWindow(inst.ID, dir, cmd)
+	if dir == "" {
+		dir, _ = os.UserHomeDir()
+	}
+
+	if cols <= 0 {
+		cols = 120
+	}
+	if rows <= 0 {
+		rows = 40
+	}
+
+	pid, err := l.daemon.Launch(daemon.LaunchParams{
+		ID:      inst.ID,
+		Command: cmd,
+		Dir:     dir,
+		Cols:    cols,
+		Rows:    rows,
+	})
 	if err != nil {
 		return fmt.Errorf("resume %s: %w", inst.Name, err)
 	}
 
-	inst.WindowID = windowID
+	inst.DaemonPID = pid
 	inst.Status = instance.StatusRunning
 	inst.StartedAt = time.Now()
-	l.tmux.SetWindowOption(windowID, "claudes-mode", inst.Mode.String())
-	l.tmux.SetRemainOnExit(windowID)
-	l.tmux.SetPaneTitle(windowID, inst.Name)
 	if l.Activity != nil && !inst.IsRemote() {
 		l.Activity.Watch(inst.ID, inst.Dir, inst.SessionID)
 	}
@@ -239,38 +258,53 @@ func (l *Launcher) Resume(id string) error {
 }
 
 // ResumeSession resumes a specific Claude session by ID.
-func (l *Launcher) ResumeSession(id, sessionID string) error {
+func (l *Launcher) ResumeSession(id, sessionID string, cols, rows int) error {
 	inst := l.manager.Get(id)
 	if inst == nil {
 		return fmt.Errorf("instance %q not found", id)
 	}
 
-	_ = l.tmux.KillWindow(inst.WindowID)
-	l.tmux.KillWindowByName(inst.ID)
+	_ = l.daemon.Kill(id)
 
 	opts := LaunchOpts{
 		Name:      inst.Name,
 		Dir:       inst.Dir,
 		Dangerous: inst.Mode == instance.ModeDanger,
 		SessionID: sessionID,
+		Cols:      cols,
+		Rows:      rows,
 	}
 	cmd := wrapCommand(BuildCommand(opts), inst.Host, inst.Dir, inst.ID)
 	dir := opts.Dir
 	if inst.IsRemote() {
 		dir = ""
 	}
-	windowID, err := l.tmux.NewWindow(inst.ID, dir, cmd)
+	if dir == "" {
+		dir, _ = os.UserHomeDir()
+	}
+
+	if cols <= 0 {
+		cols = 120
+	}
+	if rows <= 0 {
+		rows = 40
+	}
+
+	pid, err := l.daemon.Launch(daemon.LaunchParams{
+		ID:      inst.ID,
+		Command: cmd,
+		Dir:     dir,
+		Cols:    cols,
+		Rows:    rows,
+	})
 	if err != nil {
 		return fmt.Errorf("resume session %s: %w", inst.Name, err)
 	}
 
-	inst.WindowID = windowID
+	inst.DaemonPID = pid
 	inst.SessionID = sessionID
 	inst.Status = instance.StatusRunning
 	inst.StartedAt = time.Now()
-	l.tmux.SetWindowOption(windowID, "claudes-mode", inst.Mode.String())
-	l.tmux.SetRemainOnExit(windowID)
-	l.tmux.SetPaneTitle(windowID, inst.Name)
 	if l.Activity != nil && !inst.IsRemote() {
 		l.Activity.Watch(inst.ID, inst.Dir, sessionID)
 	}
@@ -279,62 +313,38 @@ func (l *Launcher) ResumeSession(id, sessionID string) error {
 }
 
 // RefreshStatuses updates the status of all managed instances by checking
-// tmux window state and JSONL session files. Persists changes when status transitions.
+// daemon process state and JSONL session files.
 func (l *Launcher) RefreshStatuses() {
-	windowMap := l.tmux.WindowInfoMap()
+	procs, err := l.daemon.List()
+	if err != nil {
+		return
+	}
+	procMap := make(map[string]daemon.ProcessInfo)
+	for _, p := range procs {
+		procMap[p.ID] = p
+	}
 
 	all := l.manager.All()
 	for _, inst := range all {
 		prev := inst.Status
 
-		// Instance is previewed inside the dashboard pane — its own window
-		// was destroyed by join-pane, so skip the window-based check.
-		if inst.ID == l.PreviewingID {
-			// Still use JSONL activity status if available
-			if l.Activity != nil && !inst.IsRemote() {
-				inst.Status = l.Activity.Status(inst.ID)
-			}
-			if inst.Status != prev {
-				l.manager.SaveInstance(inst.ID)
-			}
-			continue
-		}
-
-		w, found := windowMap[inst.ID]
-		if !found {
-			// Window is gone — instance is stopped
-			if inst.Status != instance.StatusStopped {
-				// Capture session ID on transition to stopped (local only)
-				if !inst.IsRemote() {
-					if sid := ActiveSessionID(inst.Dir); sid != "" {
-						inst.SessionID = sid
-					}
-				}
-				inst.WindowID = ""
-				inst.PanePID = ""
-			}
-			inst.Status = instance.StatusStopped
-		} else if w.PaneDead {
-			// Window exists but the pane's process has exited (remain-on-exit kept it).
+		p, found := procMap[inst.ID]
+		if !found || !p.Running {
+			// Process gone or exited
 			if inst.Status != instance.StatusStopped {
 				if !inst.IsRemote() {
 					if sid := ActiveSessionID(inst.Dir); sid != "" {
 						inst.SessionID = sid
 					}
 				}
-				inst.PanePID = ""
+				inst.DaemonPID = 0
 			}
-			// Kill the stale window immediately so it doesn't linger.
-			_ = l.tmux.KillWindow(w.ID)
-			inst.WindowID = ""
 			inst.Status = instance.StatusStopped
 		} else if inst.IsRemote() {
-			// Remote instance with live pane — assume running (no JSONL access)
-			inst.PanePID = w.PanePID
+			inst.DaemonPID = p.PID
 			inst.Status = instance.StatusRunning
 		} else {
-			// Update PID from tmux
-			inst.PanePID = w.PanePID
+			inst.DaemonPID = p.PID
 			if l.Activity != nil {
 				inst.Status = l.Activity.Status(inst.ID)
 			} else {
@@ -350,10 +360,8 @@ func (l *Launcher) RefreshStatuses() {
 	refreshProcStats(all)
 }
 
-// ToggleDangerous switches between safe and dangerous mode by killing the
-// current session and resuming it with (or without) --dangerously-skip-permissions.
-// Returns an error if the instance is currently busy (working).
-func (l *Launcher) ToggleDangerous(id string) error {
+// ToggleDangerous switches between safe and dangerous mode.
+func (l *Launcher) ToggleDangerous(id string, cols, rows int) error {
 	inst := l.manager.Get(id)
 	if inst == nil {
 		return fmt.Errorf("instance %q not found", id)
@@ -363,41 +371,53 @@ func (l *Launcher) ToggleDangerous(id string) error {
 		return fmt.Errorf("instance %q is busy — wait until idle", inst.Name)
 	}
 
-	// Determine new mode
 	newMode := instance.ModeDanger
 	if inst.Mode == instance.ModeDanger {
 		newMode = instance.ModeSafe
 	}
 
-	// Kill old window
-	_ = l.tmux.KillWindow(inst.WindowID)
+	_ = l.daemon.Kill(id)
 
-	// Relaunch with new mode — use plain --resume so the user can pick the session
 	opts := LaunchOpts{
 		Name:      inst.Name,
 		Dir:       inst.Dir,
 		Dangerous: newMode == instance.ModeDanger,
 		Resume:    true,
+		Cols:      cols,
+		Rows:      rows,
 	}
 	cmd := wrapCommand(BuildCommand(opts), inst.Host, inst.Dir, inst.ID)
 	dir := opts.Dir
 	if inst.IsRemote() {
 		dir = ""
 	}
-	windowID, err := l.tmux.NewWindow(inst.ID, dir, cmd)
+	if dir == "" {
+		dir, _ = os.UserHomeDir()
+	}
+	if cols <= 0 {
+		cols = 120
+	}
+	if rows <= 0 {
+		rows = 40
+	}
+
+	pid, err := l.daemon.Launch(daemon.LaunchParams{
+		ID:      inst.ID,
+		Command: cmd,
+		Dir:     dir,
+		Cols:    cols,
+		Rows:    rows,
+	})
 	if err != nil {
 		inst.Status = instance.StatusError
 		return fmt.Errorf("relaunch %s: %w", inst.Name, err)
 	}
 
-	inst.WindowID = windowID
+	inst.DaemonPID = pid
 	inst.Mode = newMode
 	inst.SessionID = ""
 	inst.Status = instance.StatusRunning
 	inst.StartedAt = time.Now()
-	l.tmux.SetWindowOption(windowID, "claudes-mode", newMode.String())
-	l.tmux.SetRemainOnExit(windowID)
-	l.tmux.SetPaneTitle(windowID, inst.Name)
 	if l.Activity != nil && !inst.IsRemote() {
 		l.Activity.Watch(inst.ID, inst.Dir, "")
 	}
@@ -405,115 +425,38 @@ func (l *Launcher) ToggleDangerous(id string) error {
 	return nil
 }
 
-// Attach switches the tmux client to the instance's window.
-func (l *Launcher) Attach(id string) error {
-	inst := l.manager.Get(id)
-	if inst == nil {
-		return fmt.Errorf("instance %q not found", id)
-	}
-	return l.tmux.SelectWindow(inst.WindowID)
-}
-
-// CaptureOutput grabs recent output from an instance.
-func (l *Launcher) CaptureOutput(id string, lines int) (string, error) {
-	inst := l.manager.Get(id)
-	if inst == nil {
-		return "", fmt.Errorf("instance %q not found", id)
-	}
-	return l.tmux.CapturePane(inst.WindowID, lines)
-}
-
-// Reconcile loads instances from the database, then merges with live tmux windows.
-// Three cases: DB+window → running (update WindowID), DB+no-window → stopped,
-// orphan window (not in DB) → add for backward compat.
+// Reconcile loads instances from the database, then merges with live daemon processes.
 func (l *Launcher) Reconcile() {
-	// Step 1: Load persisted instances from the store.
 	l.manager.LoadAll()
 
-	// Step 2: Build a map of live tmux windows (keyed by window name = instance ID).
-	windows, err := l.tmux.ListWindows()
+	procs, err := l.daemon.List()
 	if err != nil {
 		return
 	}
-	windowByName := make(map[string]tmux.WindowInfo)
-	for _, w := range windows {
-		if w.Name != tmux.DashboardWindowName && w.Name != "dashboard" {
-			windowByName[w.Name] = w
-		}
+	procMap := make(map[string]daemon.ProcessInfo)
+	for _, p := range procs {
+		procMap[p.ID] = p
 	}
 
-	// Step 3: Reconcile DB instances with live windows.
-	known := make(map[string]bool)
 	for _, inst := range l.manager.All() {
-		known[inst.ID] = true
-		if w, found := windowByName[inst.ID]; found {
-			// DB + window → running, update window ID.
-			inst.WindowID = w.ID
-			if w.PaneDead {
-				inst.Status = instance.StatusStopped
-			} else {
+		if p, found := procMap[inst.ID]; found {
+			inst.DaemonPID = p.PID
+			if p.Running {
 				inst.Status = instance.StatusRunning
+			} else {
+				inst.Status = instance.StatusStopped
 			}
 			l.manager.SaveInstance(inst.ID)
 		} else {
-			// DB + no window → stopped.
 			inst.Status = instance.StatusStopped
-			inst.WindowID = ""
+			inst.DaemonPID = 0
 		}
 	}
 
-	// Step 4: Orphan windows not in DB → add (backward compat).
-	// For orphan windows, the window name might be a human name (old schema)
-	// or an ID. Either way, generate a new ID and rename the window.
-	for name, w := range windowByName {
-		if known[name] {
-			continue
-		}
-
-		status := instance.StatusRunning
-		if w.PaneDead {
-			status = instance.StatusStopped
-		}
-
-		mode := instance.ModeSafe
-		var sessionID string
-
-		if modeOpt := l.tmux.GetWindowOption(w.ID, "claudes-mode"); modeOpt == "DANGER" {
-			mode = instance.ModeDanger
-		}
-
-		fullCmd := l.tmux.GetFullCommand(w.PanePID)
-		if mode == instance.ModeSafe && strings.Contains(fullCmd, "--dangerously-skip-permissions") {
-			mode = instance.ModeDanger
-		}
-		if idx := strings.Index(fullCmd, "--resume "); idx != -1 {
-			rest := fullCmd[idx+len("--resume "):]
-			if parts := strings.Fields(rest); len(parts) > 0 {
-				sessionID = parts[0]
-			}
-		}
-
-		newID := instance.GenerateID()
-		// Rename the tmux window from old name to new ID
-		_ = l.tmux.RenameWindow(w.ID, newID)
-
-		inst := &instance.Instance{
-			ID:        newID,
-			Name:      name, // preserve original name as display name
-			Dir:       w.PanePath,
-			Status:    status,
-			Mode:      mode,
-			WindowID:  w.ID,
-			SessionID: sessionID,
-			StartedAt: time.Now(),
-		}
-		l.manager.Add(inst) // Add persists to store automatically
-	}
-
-	// Step 5: Set up activity watches for all local instances with live windows.
+	// Set up activity watches for running local instances
 	if l.Activity != nil {
 		for _, inst := range l.manager.All() {
-			if inst.WindowID != "" && !inst.IsRemote() {
+			if inst.DaemonPID != 0 && !inst.IsRemote() {
 				l.Activity.Watch(inst.ID, inst.Dir, inst.SessionID)
 			}
 		}

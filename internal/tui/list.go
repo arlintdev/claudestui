@@ -7,22 +7,23 @@ import (
 
 	"github.com/arlintdev/claudes/internal/claude"
 	"github.com/arlintdev/claudes/internal/instance"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // ListView renders the instance list as bordered cards.
 type ListView struct {
-	instances      []*instance.Instance
-	cursor         int
-	width          int
-	height         int
-	scrollOffset   int // first visible row (in visual row space)
-	theme          Theme
-	filter         string
-	activity       map[string]string              // id → last activity line
-	activityStates map[string]*claude.ActivityState // id → enriched state
-	selected       map[string]bool                 // multi-select set (id → true)
-	animFrame      int                             // animation frame counter for robots
+	instances       []*instance.Instance
+	cursor          int
+	width           int
+	height          int
+	scrollOffset    int // first visible row (in visual row space)
+	theme           Theme
+	filter          string
+	activity        map[string]string              // id → last activity line
+	activityStates  map[string]*claude.ActivityState // id → enriched state
+	selected        map[string]bool                 // multi-select set (id → true)
+	animFrame       int                             // animation frame counter for robots
+	previewFocused  bool                            // true when preview pane has focus
 }
 
 const cardRows = 5 // top border (with title+status) + 3 content lines + bottom border
@@ -126,6 +127,11 @@ func (l *ListView) SetActivityState(id string, state *claude.ActivityState) {
 	l.activityStates[id] = state
 }
 
+// ActivityState returns the activity state for an instance.
+func (l *ListView) ActivityState(id string) *claude.ActivityState {
+	return l.activityStates[id]
+}
+
 // SetActivity stores the last activity line for an instance (keyed by ID).
 func (l *ListView) SetActivity(id, line string) {
 	l.activity[id] = line
@@ -206,15 +212,23 @@ func (l *ListView) Sync(instances []*instance.Instance) {
 
 // MoveUp moves the cursor up.
 func (l *ListView) MoveUp() {
-	if l.cursor > 0 {
-		l.cursor--
+	if len(l.instances) == 0 {
+		return
+	}
+	l.cursor--
+	if l.cursor < 0 {
+		l.cursor = len(l.instances) - 1
 	}
 }
 
 // MoveDown moves the cursor down.
 func (l *ListView) MoveDown() {
-	if l.cursor < len(l.instances)-1 {
-		l.cursor++
+	if len(l.instances) == 0 {
+		return
+	}
+	l.cursor++
+	if l.cursor >= len(l.instances) {
+		l.cursor = 0
 	}
 }
 
@@ -441,21 +455,25 @@ func (l *ListView) View() string {
 		cardParts = append(cardParts, bottomBorder)
 		card := strings.Join(cardParts, "\n")
 
-		// Prepend cursor indicator: ▐ for selected, space for others
-		if isCursor {
-			indicator := l.theme.CardBorderSelected.Render("▐")
-			cardLines := strings.Split(card, "\n")
+		// Cursor indicator: left side when in menu, right side when preview focused
+		indicator := l.theme.CardBorderSelected.Render("▐")
+		cardLines := strings.Split(card, "\n")
+		if isCursor && l.previewFocused {
+			// Right-side indicator
+			for j := range cardLines {
+				cardLines[j] = " " + cardLines[j] + indicator
+			}
+		} else if isCursor {
+			// Left-side indicator
 			for j := range cardLines {
 				cardLines[j] = indicator + cardLines[j]
 			}
-			card = strings.Join(cardLines, "\n")
 		} else {
-			cardLines := strings.Split(card, "\n")
 			for j := range cardLines {
 				cardLines[j] = " " + cardLines[j]
 			}
-			card = strings.Join(cardLines, "\n")
 		}
+		card = strings.Join(cardLines, "\n")
 
 		allRows = append(allRows, card)
 	}
@@ -514,12 +532,12 @@ func (l *ListView) statusInfo(inst *instance.Instance) (dot, status, age, robotK
 			robotKey, robotStyle = "idle", l.theme.StatusIdle
 		}
 	case inst.Status == instance.StatusError:
-		dot = l.statusDot(inst.Status)
-		status = l.styleStatus(inst.Status)
+		dot = l.StatusDot(inst.Status)
+		status = l.StyleStatus(inst.Status)
 		robotKey, robotStyle = "error", l.theme.StatusError
 	default:
-		dot = l.statusDot(inst.Status)
-		status = l.styleStatus(inst.Status)
+		dot = l.StatusDot(inst.Status)
+		status = l.StyleStatus(inst.Status)
 		robotKey, robotStyle = "stopped", l.theme.StatusStopped
 	}
 	return
@@ -527,7 +545,7 @@ func (l *ListView) statusInfo(inst *instance.Instance) (dot, status, age, robotK
 
 // cardLine2: mode + dir
 func (l *ListView) cardLine2(inst *instance.Instance, w int) string {
-	mode := l.styleMode(inst.Mode)
+	mode := l.StyleMode(inst.Mode)
 	dir := truncate(inst.Dir, w-lipgloss.Width(mode)-3)
 	return mode + "  " + l.theme.Muted.Render(dir)
 }
@@ -606,8 +624,8 @@ func (l *ListView) activityKindStyle(k claude.ActivityKind) lipgloss.Style {
 	}
 }
 
-// statusDot returns a colored bullet for the status.
-func (l *ListView) statusDot(s instance.Status) string {
+// StatusDot returns a colored bullet for the status.
+func (l *ListView) StatusDot(s instance.Status) string {
 	dot := "●"
 	switch s {
 	case instance.StatusRunning:
@@ -668,7 +686,7 @@ func sliceVisualRows(rows []string, offset, limit int) []string {
 	return allLines[offset:end]
 }
 
-func (l *ListView) styleStatus(s instance.Status) string {
+func (l *ListView) StyleStatus(s instance.Status) string {
 	switch s {
 	case instance.StatusRunning:
 		return l.theme.StatusRunning.Render(s.String())
@@ -681,7 +699,7 @@ func (l *ListView) styleStatus(s instance.Status) string {
 	}
 }
 
-func (l *ListView) styleMode(m instance.Mode) string {
+func (l *ListView) StyleMode(m instance.Mode) string {
 	if m == instance.ModeDanger {
 		return l.theme.ModeDanger.Render(m.String())
 	}

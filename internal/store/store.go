@@ -58,7 +58,7 @@ func (s *Store) ensureSchema() error {
 	}
 
 	if count == 0 {
-		// Fresh install — create table with id as primary key.
+		// Fresh install — create table without window_id.
 		const ddl = `CREATE TABLE instances (
 			id         TEXT PRIMARY KEY,
 			name       TEXT NOT NULL,
@@ -68,7 +68,6 @@ func (s *Store) ensureSchema() error {
 			model      TEXT NOT NULL DEFAULT '',
 			host       TEXT NOT NULL DEFAULT '',
 			group_name TEXT NOT NULL DEFAULT '',
-			window_id  TEXT NOT NULL DEFAULT '',
 			session_id TEXT NOT NULL DEFAULT '',
 			started_at TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -77,7 +76,11 @@ func (s *Store) ensureSchema() error {
 		return err
 	}
 
-	// Table exists — check if it has the id column.
+	// Table exists — handle migrations.
+	// Add host column if missing (ignore error if already exists).
+	_, _ = s.db.Exec("ALTER TABLE instances ADD COLUMN host TEXT NOT NULL DEFAULT ''")
+
+	// Check if it has the id column (old schema migration).
 	hasID := false
 	rows, err := s.db.Query("PRAGMA table_info(instances)")
 	if err != nil {
@@ -99,13 +102,10 @@ func (s *Store) ensureSchema() error {
 	}
 
 	if hasID {
-		// Migrate: add host column if missing (ignore error if already exists).
-		_, _ = s.db.Exec("ALTER TABLE instances ADD COLUMN host TEXT NOT NULL DEFAULT ''")
 		return nil
 	}
 
 	// Migrate: old schema has name as PK, no id column.
-	// Recreate the table with id as PK, generating IDs for existing rows.
 	_, err = s.db.Exec(`
 		CREATE TABLE instances_new (
 			id         TEXT PRIMARY KEY,
@@ -114,8 +114,8 @@ func (s *Store) ensureSchema() error {
 			task       TEXT NOT NULL DEFAULT '',
 			mode       TEXT NOT NULL DEFAULT 'safe',
 			model      TEXT NOT NULL DEFAULT '',
+			host       TEXT NOT NULL DEFAULT '',
 			group_name TEXT NOT NULL DEFAULT '',
-			window_id  TEXT NOT NULL DEFAULT '',
 			session_id TEXT NOT NULL DEFAULT '',
 			started_at TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -124,14 +124,12 @@ func (s *Store) ensureSchema() error {
 		return err
 	}
 
-	// Copy data, generating random hex IDs for each row.
-	// Also handle older schemas that may lack model or group_name columns.
 	_, _ = s.db.Exec("ALTER TABLE instances ADD COLUMN model TEXT NOT NULL DEFAULT ''")
 	_, _ = s.db.Exec("ALTER TABLE instances ADD COLUMN group_name TEXT NOT NULL DEFAULT ''")
 
 	_, err = s.db.Exec(`
-		INSERT INTO instances_new (id, name, dir, task, mode, model, group_name, window_id, session_id, started_at, created_at)
-		SELECT lower(hex(randomblob(4))), name, dir, task, mode, model, group_name, window_id, session_id, started_at, created_at
+		INSERT INTO instances_new (id, name, dir, task, mode, model, group_name, session_id, started_at, created_at)
+		SELECT lower(hex(randomblob(4))), name, dir, task, mode, model, group_name, session_id, started_at, created_at
 		FROM instances`)
 	if err != nil {
 		s.db.Exec("DROP TABLE instances_new")
@@ -152,17 +150,17 @@ func (s *Store) Close() error {
 }
 
 // Save persists an instance row (INSERT OR REPLACE).
-func (s *Store) Save(id, name, dir, task, mode, model, host, groupName, windowID, sessionID, startedAt string) error {
+func (s *Store) Save(id, name, dir, task, mode, model, host, groupName, sessionID, startedAt string) error {
 	const q = `INSERT OR REPLACE INTO instances
-		(id, name, dir, task, mode, model, host, group_name, window_id, session_id, started_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := s.db.Exec(q, id, name, dir, task, mode, model, host, groupName, windowID, sessionID, startedAt)
+		(id, name, dir, task, mode, model, host, group_name, session_id, started_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := s.db.Exec(q, id, name, dir, task, mode, model, host, groupName, sessionID, startedAt)
 	return err
 }
 
 // All returns all persisted instance rows.
 func (s *Store) All() ([]instance.StoreRow, error) {
-	const q = `SELECT id, name, dir, task, mode, model, host, group_name, window_id, session_id, started_at FROM instances`
+	const q = `SELECT id, name, dir, task, mode, model, host, group_name, session_id, started_at FROM instances`
 	rows, err := s.db.Query(q)
 	if err != nil {
 		return nil, err
@@ -172,7 +170,7 @@ func (s *Store) All() ([]instance.StoreRow, error) {
 	var out []instance.StoreRow
 	for rows.Next() {
 		var r instance.StoreRow
-		if err := rows.Scan(&r.ID, &r.Name, &r.Dir, &r.Task, &r.Mode, &r.Model, &r.Host, &r.GroupName, &r.WindowID, &r.SessionID, &r.StartedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.Dir, &r.Task, &r.Mode, &r.Model, &r.Host, &r.GroupName, &r.SessionID, &r.StartedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

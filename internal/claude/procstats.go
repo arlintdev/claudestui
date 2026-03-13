@@ -8,15 +8,15 @@ import (
 	"github.com/arlintdev/claudes/internal/instance"
 )
 
-// refreshProcStats updates CPU and MemKB for all instances that have a PanePID.
+// refreshProcStats updates CPU and MemKB for all instances that have a DaemonPID.
 func refreshProcStats(instances []*instance.Instance) {
-	// Collect PIDs to query
 	pidToInst := make(map[string]*instance.Instance)
 	var pids []string
 	for _, inst := range instances {
-		if inst.PanePID != "" && inst.Status != instance.StatusStopped {
-			pidToInst[inst.PanePID] = inst
-			pids = append(pids, inst.PanePID)
+		if inst.DaemonPID != 0 && inst.Status != instance.StatusStopped {
+			pidStr := strconv.Itoa(inst.DaemonPID)
+			pidToInst[pidStr] = inst
+			pids = append(pids, pidStr)
 		} else {
 			inst.CPU = 0
 			inst.MemKB = 0
@@ -26,7 +26,6 @@ func refreshProcStats(instances []*instance.Instance) {
 		return
 	}
 
-	// Single ps call for all PIDs
 	args := append([]string{"-o", "pid=,pcpu=,rss=", "-p"}, strings.Join(pids, ","))
 	out, err := exec.Command("ps", args...).Output()
 	if err != nil {

@@ -9,10 +9,10 @@ import (
 
 	"github.com/arlintdev/claudes/internal/claude"
 	"github.com/arlintdev/claudes/internal/sshconfig"
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // DialogKind represents the type of dialog currently shown.
@@ -287,7 +287,7 @@ func (d *Dialog) updateUpdateDialog(msg tea.Msg) tea.Cmd {
 	if d.updateDownloading {
 		return nil // ignore input while downloading
 	}
-	if msg, ok := msg.(tea.KeyMsg); ok {
+	if msg, ok := msg.(tea.KeyPressMsg); ok {
 		switch msg.String() {
 		case "left", "h":
 			if d.updateCur > 0 {
@@ -305,7 +305,7 @@ func (d *Dialog) updateUpdateDialog(msg tea.Msg) tea.Cmd {
 }
 
 func (d *Dialog) updateNew(msg tea.Msg) tea.Cmd {
-	if msg, ok := msg.(tea.KeyMsg); ok {
+	if msg, ok := msg.(tea.KeyPressMsg); ok {
 		switch {
 		case key.Matches(msg, key.NewBinding(key.WithKeys("tab"))):
 			d.advanceFocus(1)
@@ -322,7 +322,7 @@ func (d *Dialog) updateNew(msg tea.Msg) tea.Cmd {
 				if d.modelCur > 0 {
 					d.modelCur--
 				}
-			case "right", "l", " ":
+			case "right", "l", "space":
 				if d.modelCur < len(modelChoices)-1 {
 					d.modelCur++
 				} else {
@@ -339,7 +339,7 @@ func (d *Dialog) updateNew(msg tea.Msg) tea.Cmd {
 				if d.hostCur > 0 {
 					d.hostCur--
 				}
-			case "right", "l", " ":
+			case "right", "l", "space":
 				if d.hostCur < len(d.hostChoices)-1 {
 					d.hostCur++
 				} else {
@@ -359,7 +359,7 @@ func (d *Dialog) updateNew(msg tea.Msg) tea.Cmd {
 		// Danger toggle: space/left/right to toggle
 		if d.focus == 6 {
 			switch msg.String() {
-			case " ", "left", "right", "h", "l":
+			case "space", "left", "right", "h", "l":
 				d.dangerous = !d.dangerous
 			}
 			return nil
@@ -368,20 +368,14 @@ func (d *Dialog) updateNew(msg tea.Msg) tea.Cmd {
 		// Resume toggle: space/left/right to toggle
 		if d.focus == 7 {
 			switch msg.String() {
-			case " ", "left", "right", "h", "l":
+			case "space", "left", "right", "h", "l":
 				d.resume = !d.resume
 			}
 			return nil
 		}
 
-		// Directory field: tab-completion on Tab is handled by advanceFocus,
-		// but we handle the actual autocomplete trigger here.
+		// Directory field: update completions on every keystroke
 		if d.focus == 1 {
-			switch msg.String() {
-			case "ctrl+i": // ctrl+i = tab in some terminals, but we use tab for field nav
-				// no-op, handled above
-			}
-			// Update completions on every keystroke in dir field
 			defer d.updateDirCompletions()
 		}
 	}
@@ -428,8 +422,6 @@ func (d *Dialog) updateDirCompletions() {
 
 	path := expandHome(raw)
 
-	// If path exists and is a directory, list its children
-	// If not, treat it as a partial name and list parent's children matching prefix
 	dir := path
 	prefix := ""
 	if info, err := os.Stat(path); err != nil || !info.IsDir() {
@@ -460,7 +452,6 @@ func (d *Dialog) updateDirCompletions() {
 	}
 	sort.Strings(matches)
 
-	// Limit to 8 suggestions
 	if len(matches) > 8 {
 		matches = matches[:8]
 	}
@@ -488,7 +479,6 @@ func expandHome(path string) string {
 }
 
 // defaultDockerImage is the default image pre-filled for docker instances.
-// Uses node:20 since claude-code installs via npm/npx.
 const defaultDockerImage = "node:20"
 
 func contractHome(path string) string {
@@ -506,7 +496,7 @@ func (d *Dialog) updateFilter(msg tea.Msg) tea.Cmd {
 }
 
 func (d *Dialog) updateSessionPicker(msg tea.Msg) tea.Cmd {
-	if msg, ok := msg.(tea.KeyMsg); ok {
+	if msg, ok := msg.(tea.KeyPressMsg); ok {
 		switch msg.String() {
 		case "j", "down":
 			if d.sessionCur < len(d.sessions)-1 {
@@ -566,19 +556,11 @@ func (d *Dialog) viewNew() string {
 	}
 	innerW := cardW - 4 // border + padding
 
-	// Line 1: Name input
 	line1 := d.fieldLabel("Name", 0) + d.inputs[0].View()
-
-	// Line 2: Dir input
 	line2 := d.fieldLabel("Dir", 1) + d.inputs[1].View()
-
-	// Line 3: Task input
 	line3 := d.fieldLabel("Task", 2) + d.inputs[2].View()
-
-	// Line 4: Model selector (own line)
 	line4 := d.fieldLabel("Model", 3) + d.renderSelector(3, modelLabels, d.modelCur)
 
-	// Line 5: Host selector (own line)
 	hostLabels := make([]string, len(d.hostChoices))
 	for i, h := range d.hostChoices {
 		if strings.HasPrefix(h, "ssh:") {
@@ -588,18 +570,15 @@ func (d *Dialog) viewNew() string {
 		}
 	}
 	line5 := d.fieldLabel("Host", 4) + d.renderSelector(4, hostLabels, d.hostCur)
-
-	// Toggles line: both on same line
 	line6 := d.renderToggle("danger", d.dangerous, 6) + "  " + d.renderToggle("resume", d.resume, 7)
 
-	// Context-sensitive hint line
 	var hint string
 	switch {
-	case d.focus < 3 || d.focus == 5: // text inputs
+	case d.focus < 3 || d.focus == 5:
 		hint = d.theme.Muted.Render("Tab: next  Enter: create  Esc: cancel")
-	case d.focus == 3 || d.focus == 4: // selectors
+	case d.focus == 3 || d.focus == 4:
 		hint = d.theme.Muted.Render("◀▶/Space: select  Tab: next  Enter: create")
-	case d.focus == 6 || d.focus == 7: // toggles
+	case d.focus == 6 || d.focus == 7:
 		hint = d.theme.Muted.Render("Space/◀▶: toggle  Tab: next  Enter: create")
 	}
 	hintLine := "  " + hint
@@ -607,7 +586,6 @@ func (d *Dialog) viewNew() string {
 	var rows []string
 	rows = append(rows, line1, line2, line3)
 
-	// Dir completions
 	if d.focus == 1 && len(d.dirCompletions) > 0 {
 		for j, comp := range d.dirCompletions {
 			prefix := "  "
@@ -620,7 +598,6 @@ func (d *Dialog) viewNew() string {
 
 	rows = append(rows, line4, line5)
 
-	// Docker image (only when host is docker)
 	if d.hostChoices[d.hostCur] == "docker" {
 		imgLine := d.fieldLabel("Image", 5) + d.dockerImage.View()
 		rows = append(rows, imgLine)
@@ -638,7 +615,6 @@ func (d *Dialog) viewNew() string {
 		Render(content)
 }
 
-// renderSelector renders a selector field with arrows when focused.
 func (d *Dialog) renderSelector(focusIdx int, labels []string, cur int) string {
 	focused := d.focus == focusIdx
 	if focused {
@@ -652,11 +628,9 @@ func (d *Dialog) renderSelector(focusIdx int, labels []string, cur int) string {
 		}
 		return "◀ " + strings.Join(parts, "") + " ▶"
 	}
-	// Unfocused: just show current value in muted
 	return d.theme.Muted.Render(labels[cur])
 }
 
-// renderToggle renders a toggle with appropriate styling.
 func (d *Dialog) renderToggle(label string, on bool, focusIdx int) string {
 	focused := d.focus == focusIdx
 	check := "[ ]"
@@ -665,14 +639,12 @@ func (d *Dialog) renderToggle(label string, on bool, focusIdx int) string {
 	}
 
 	if focused {
-		// Focused: accent color with arrows
 		accent := d.theme.Bold
 		if label == "danger" && on {
 			accent = d.theme.ModeDanger
 		}
 		return accent.Render("◀ " + check + " " + label + " ▶")
 	}
-	// Unfocused
 	if on && label == "danger" {
 		return d.theme.ModeDanger.Render(check + " " + label)
 	}
@@ -682,10 +654,7 @@ func (d *Dialog) renderToggle(label string, on bool, focusIdx int) string {
 	return d.theme.Muted.Render(check + " " + label)
 }
 
-// fieldLabel renders a field label with focus indicator.
-// Focused: "▸ Name:" in bold. Unfocused: "  Name:" in label color.
 func (d *Dialog) fieldLabel(name string, focusIdx int) string {
-	// Pad name to 6 chars for alignment (longest is "Model" / "Image")
 	padded := fmt.Sprintf("%-6s", name+":")
 	if d.focus == focusIdx {
 		return d.theme.Bold.Render("▸ " + padded)
@@ -784,7 +753,6 @@ func (d *Dialog) viewUpdate() string {
 		return d.theme.Dialog.Width(44).Render(content)
 	}
 
-	// Two options: Update & Restart, Skip
 	options := []string{"Update & Restart", "Skip"}
 	var parts []string
 	for i, opt := range options {

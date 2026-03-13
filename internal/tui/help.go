@@ -1,6 +1,6 @@
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import "charm.land/lipgloss/v2"
 
 // HelpOverlay renders the help screen.
 type HelpOverlay struct {
@@ -51,7 +51,8 @@ func (h *HelpOverlay) View() string {
 		{"x", "Stop all idle instances"},
 		{"d", "Delete instance(s) (confirm)"},
 		{"g", "Group / ungroup"},
-		{"Enter", "Attach instance"},
+		{"Enter", "Attach instance (focus preview)"},
+		{"Ctrl+Space", "Detach (return to menu)"},
 		{"Ctrl+r", "Resume instance"},
 		{"Space", "Toggle multi-select"},
 		{"Ctrl+a", "Select all"},
@@ -59,8 +60,6 @@ func (h *HelpOverlay) View() string {
 		{"j/k ↑/↓", "Navigate"},
 		{"?", "Toggle this help"},
 		{"q", "Quit"},
-		{"", ""},
-		{"Left-click", "Attach instance"},
 	}
 
 	var rows []string
