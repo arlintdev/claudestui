@@ -17,7 +17,11 @@ type Launcher struct {
 	tmux     *tmux.Client
 	manager  *instance.Manager
 	Activity *ActivityWatcher
-	TiledIDs map[string]bool // instance IDs in a tiled view — skip status refresh
+
+	// PreviewingID is the instance currently shown in the dashboard preview pane.
+	// Its tmux window has been merged into the dashboard, so RefreshStatuses
+	// must skip the window-based lookup for this instance.
+	PreviewingID string
 }
 
 // NewLauncher creates a new Claude launcher.
@@ -281,12 +285,21 @@ func (l *Launcher) RefreshStatuses() {
 
 	all := l.manager.All()
 	for _, inst := range all {
-		// Skip instances that are in a tiled view — their windows
-		// were merged via join-pane so they won't appear in ListWindows.
-		if l.TiledIDs[inst.ID] {
+		prev := inst.Status
+
+		// Instance is previewed inside the dashboard pane — its own window
+		// was destroyed by join-pane, so skip the window-based check.
+		if inst.ID == l.PreviewingID {
+			// Still use JSONL activity status if available
+			if l.Activity != nil && !inst.IsRemote() {
+				inst.Status = l.Activity.Status(inst.ID)
+			}
+			if inst.Status != prev {
+				l.manager.SaveInstance(inst.ID)
+			}
 			continue
 		}
-		prev := inst.Status
+
 		w, found := windowMap[inst.ID]
 		if !found {
 			// Window is gone — instance is stopped

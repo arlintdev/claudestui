@@ -223,6 +223,58 @@ func (c *Client) CapturePane(windowID string, lines int) (string, error) {
 	return out, nil
 }
 
+// JoinPaneRight joins a window's pane into another window as a right-side
+// horizontal split. Returns the pane ID of the joined pane. The source window
+// is destroyed by tmux.
+func (c *Client) JoinPaneRight(srcWindowID, dstWindowID string, percent int) (string, error) {
+	src := fmt.Sprintf("%s:%s", SessionName, srcWindowID)
+	dst := fmt.Sprintf("%s:%s", SessionName, dstWindowID)
+	out, err := c.run("join-pane", "-h", "-s", src, "-t", dst,
+		"-l", fmt.Sprintf("%d%%", percent))
+	if err != nil {
+		return "", fmt.Errorf("join-pane %s → %s: %s (%w)", src, dst, out, err)
+	}
+	// Find the pane ID of the joined pane (last/rightmost in the target window)
+	panes, err := c.ListPanes(dstWindowID)
+	if err != nil {
+		return "", err
+	}
+	if len(panes) < 2 {
+		return "", fmt.Errorf("join-pane: expected 2+ panes, got %d", len(panes))
+	}
+	return panes[len(panes)-1].PaneID, nil
+}
+
+// FocusPane focuses a specific pane by its ID (e.g. "%5").
+func (c *Client) FocusPane(paneID string) error {
+	_, err := c.run("select-pane", "-t", paneID)
+	if err != nil {
+		return fmt.Errorf("select-pane: %w", err)
+	}
+	return nil
+}
+
+// FocusDashboardPane focuses the first (leftmost) pane in the dashboard window.
+func (c *Client) FocusDashboardPane() error {
+	target := fmt.Sprintf("%s:%s.0", SessionName, DashboardWindowName)
+	_, err := c.run("select-pane", "-t", target)
+	if err != nil {
+		return fmt.Errorf("select-pane: %w", err)
+	}
+	return nil
+}
+
+// SwapPane swaps a pane (by pane ID) with the first pane of a target window.
+// Both the source and target panes continue to exist, just in each other's location.
+func (c *Client) SwapPane(srcPaneID, dstWindowID string) error {
+	dst := fmt.Sprintf("%s:%s", SessionName, dstWindowID)
+	out, err := c.run("swap-pane", "-d", "-s", srcPaneID, "-t", dst)
+	if err != nil {
+		return fmt.Errorf("swap-pane %s → %s: %s (%w)", srcPaneID, dst, out, err)
+	}
+	return nil
+}
+
 // KillWindow destroys a window by ID. No-op if windowID is empty.
 func (c *Client) KillWindow(windowID string) error {
 	if windowID == "" {
@@ -265,7 +317,11 @@ func (c *Client) SelectWindow(windowID string) error {
 // Ctrl-Left/Right cycle through windows.
 func (c *Client) SetupKeybindings() {
 	dashTarget := fmt.Sprintf("%s:%s", SessionName, DashboardWindowName)
-	c.run("bind-key", "-T", "root", "C-Space", "select-window", "-t", dashTarget)
+	dashPane := fmt.Sprintf("%s:%s.0", SessionName, DashboardWindowName)
+	// Ctrl-Space: jump to dashboard window AND focus the first (dashboard) pane.
+	// Uses run-shell to chain commands since exec.Command can't pass ";" as a tmux separator.
+	c.run("bind-key", "-T", "root", "C-Space",
+		"run-shell", fmt.Sprintf("tmux select-window -t %s && tmux select-pane -t %s", dashTarget, dashPane))
 	// Vim-style window switching
 	c.run("bind-key", "-T", "root", "C-h", "previous-window")
 	c.run("bind-key", "-T", "root", "C-l", "next-window")
@@ -273,18 +329,32 @@ func (c *Client) SetupKeybindings() {
 	c.run("bind-key", "-T", "root", "C-j", "select-pane", "-D")
 	c.run("bind-key", "-T", "root", "C-k", "select-pane", "-U")
 
+	// When a pane dies, switch back to the dashboard and kill the dead window.
+	dashCmd := fmt.Sprintf("tmux select-window -t %s; tmux kill-pane -t '#{pane_id}'", dashTarget)
+	c.run("set-hook", "-t", SessionName, "pane-died", "run-shell", dashCmd)
+
 	// Mouse on for scroll; hold Shift to select/copy with native terminal selection.
 	c.run("set-option", "-t", SessionName, "mouse", "on")
 	// Prevent apps (like Claude Code) from overwriting pane/window titles via escape sequences.
 	c.run("set-option", "-t", SessionName, "allow-rename", "off")
 
-	// Show navigation hint + instance name in the tmux status bar
+	// Pane borders: cyan for active, dark gray for inactive
+	c.run("set-option", "-t", SessionName, "pane-border-style", "fg=#333333")
+	c.run("set-option", "-t", SessionName, "pane-active-border-style", "fg=#DA7756")
+	c.run("set-option", "-t", SessionName, "pane-border-lines", "heavy")
+
+	// Status bar
 	c.run("set-option", "-t", SessionName, "status", "on")
-	c.run("set-option", "-t", SessionName, "status-style", "bg=default,fg=colour8")
+	c.run("set-option", "-t", SessionName, "status-style", "bg=default,fg=#666666")
 	c.run("set-option", "-t", SessionName, "status-left", "")
 	c.run("set-option", "-t", SessionName, "status-right",
-		" #{pane_title}  │  ^Space dashboard  ^h/^l windows ")
+		"#[fg=#DA7756]#{pane_title}#[fg=#666666]  │  ^Space dashboard  ^h/^l windows ")
 	c.run("set-option", "-t", SessionName, "status-right-length", "80")
+
+	// Window list: subtle for inactive, cyan highlight for active
+	c.run("set-option", "-t", SessionName, "window-status-format", "#[fg=#666666] #W ")
+	c.run("set-option", "-t", SessionName, "window-status-current-format", "#[fg=#DA7756,bold] #W ")
+	c.run("set-option", "-t", SessionName, "window-status-separator", "#[fg=#333333]│")
 }
 
 // CleanupKeybindings removes claudes-specific tmux keybindings.
@@ -294,6 +364,7 @@ func (c *Client) CleanupKeybindings() {
 	c.run("unbind-key", "-T", "root", "C-l")
 	c.run("unbind-key", "-T", "root", "C-j")
 	c.run("unbind-key", "-T", "root", "C-k")
+	c.run("set-hook", "-u", "-t", SessionName, "pane-died")
 }
 
 // DetachClient detaches the current tmux client, returning the user

@@ -7,13 +7,12 @@ type KeyMap struct {
 	Up        key.Binding
 	Down      key.Binding
 	New       key.Binding
-	Danger    key.Binding
+	Mode      key.Binding
 	Stop      key.Binding
 	Delete    key.Binding
 	Resume    key.Binding
 	Attach    key.Binding
 	Filter    key.Binding
-	Profile   key.Binding
 	Help      key.Binding
 	Quit      key.Binding
 	Confirm   key.Binding
@@ -22,8 +21,6 @@ type KeyMap struct {
 	Select    key.Binding
 	SelectAll key.Binding
 	Group     key.Binding
-	BreakTile key.Binding
-	TileGroup key.Binding
 	StopIdle  key.Binding
 }
 
@@ -42,17 +39,17 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("n"),
 			key.WithHelp("n", "new instance"),
 		),
-		Danger: key.NewBinding(
-			key.WithKeys("d"),
-			key.WithHelp("d", "toggle danger mode"),
+		Mode: key.NewBinding(
+			key.WithKeys("m"),
+			key.WithHelp("m", "toggle mode"),
 		),
 		Stop: key.NewBinding(
-			key.WithKeys("ctrl+s"),
-			key.WithHelp("ctrl+s", "stop instance"),
+			key.WithKeys("s"),
+			key.WithHelp("s", "stop instance"),
 		),
 		Delete: key.NewBinding(
-			key.WithKeys("ctrl+d"),
-			key.WithHelp("ctrl+d", "delete instance"),
+			key.WithKeys("d"),
+			key.WithHelp("d", "delete instance"),
 		),
 		Resume: key.NewBinding(
 			key.WithKeys("ctrl+r"),
@@ -65,10 +62,6 @@ func DefaultKeyMap() KeyMap {
 		Filter: key.NewBinding(
 			key.WithKeys("/"),
 			key.WithHelp("/", "filter"),
-		),
-		Profile: key.NewBinding(
-			key.WithKeys("L"),
-			key.WithHelp("L", "load profile"),
 		),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
@@ -99,20 +92,12 @@ func DefaultKeyMap() KeyMap {
 			key.WithHelp("ctrl+a", "select all"),
 		),
 		Group: key.NewBinding(
-			key.WithKeys("ctrl+g"),
-			key.WithHelp("ctrl+g", "group selected"),
-		),
-		BreakTile: key.NewBinding(
-			key.WithKeys("ctrl+b"),
-			key.WithHelp("ctrl+b", "ungroup/break tile"),
-		),
-		TileGroup: key.NewBinding(
-			key.WithKeys("t"),
-			key.WithHelp("t", "open group tiled"),
+			key.WithKeys("g"),
+			key.WithHelp("g", "group/ungroup"),
 		),
 		StopIdle: key.NewBinding(
-			key.WithKeys("ctrl+x"),
-			key.WithHelp("ctrl+x", "stop all idle"),
+			key.WithKeys("x"),
+			key.WithHelp("x", "stop all idle"),
 		),
 	}
 }

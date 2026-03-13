@@ -35,11 +35,25 @@ type Theme struct {
 	HeaderInfo     lipgloss.Style
 	ErrorFlash     lipgloss.Style
 	GroupSeparator lipgloss.Style
+
+	CardBorder              lipgloss.Style
+	CardBorderSelected      lipgloss.Style
+	CardBorderMultiSelected lipgloss.Style
+
+	// Activity kind colors (used for status dot + label when running)
+	ActivityReading   lipgloss.Style
+	ActivityWriting   lipgloss.Style
+	ActivityRunning   lipgloss.Style
+	ActivitySearching lipgloss.Style
+	ActivityBrowsing  lipgloss.Style
+	ActivitySpawning  lipgloss.Style
+	ActivityThinking  lipgloss.Style
+	ActivityWaiting   lipgloss.Style
 }
 
 // DefaultTheme returns the k9s-inspired color theme.
 func DefaultTheme() Theme {
-	cyan := lipgloss.Color("#00D7FF")
+	accent := lipgloss.Color("#DA7756") // Claude Code terracotta
 	green := lipgloss.Color("#00ff87")
 	red := lipgloss.Color("#ff005f")
 	yellow := lipgloss.Color("#FFD700")
@@ -52,7 +66,7 @@ func DefaultTheme() Theme {
 	return Theme{
 		Header: lipgloss.NewStyle().
 			Bold(true).
-			Foreground(cyan).
+			Foreground(accent).
 			Padding(0, 1),
 		Footer: lipgloss.NewStyle().
 			Foreground(dimWhite).
@@ -84,11 +98,11 @@ func DefaultTheme() Theme {
 			BorderForeground(gray),
 		Dialog: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(cyan).
+			BorderForeground(accent).
 			Padding(1, 2),
 		Help: lipgloss.NewStyle().
 			Border(lipgloss.DoubleBorder()).
-			BorderForeground(cyan).
+			BorderForeground(accent).
 			Padding(1, 2),
 
 		StatusRunning: lipgloss.NewStyle().Foreground(green),
@@ -98,18 +112,31 @@ func DefaultTheme() Theme {
 		ModeDanger:    lipgloss.NewStyle().Bold(true).Foreground(red),
 		ModeSafe:      lipgloss.NewStyle().Foreground(green),
 
-		Label: lipgloss.NewStyle().Foreground(cyan),
+		Label: lipgloss.NewStyle().Foreground(accent),
 		Muted: lipgloss.NewStyle().Foreground(gray),
 		Bold:  lipgloss.NewStyle().Bold(true).Foreground(white),
 
 		// K9s-style elements
 		ShortcutKey:  lipgloss.NewStyle().Bold(true).Foreground(yellow),
 		ShortcutDesc: lipgloss.NewStyle().Foreground(dimWhite),
-		Logo:         lipgloss.NewStyle().Bold(true).Foreground(cyan),
-		HeaderLabel:  lipgloss.NewStyle().Bold(true).Foreground(cyan),
+		Logo:         lipgloss.NewStyle().Bold(true).Foreground(accent),
+		HeaderLabel:  lipgloss.NewStyle().Bold(true).Foreground(accent),
 		HeaderValue:  lipgloss.NewStyle().Foreground(dimWhite),
-		HeaderInfo:   lipgloss.NewStyle().Foreground(cyan),
+		HeaderInfo:   lipgloss.NewStyle().Foreground(accent),
 		ErrorFlash:     lipgloss.NewStyle().Bold(true).Foreground(red).Padding(0, 1),
-		GroupSeparator: lipgloss.NewStyle().Bold(true).Foreground(cyan),
+		GroupSeparator: lipgloss.NewStyle().Bold(true).Foreground(accent),
+
+		CardBorder:              lipgloss.NewStyle().Foreground(gray),
+		CardBorderSelected:      lipgloss.NewStyle().Foreground(accent),
+		CardBorderMultiSelected: lipgloss.NewStyle().Foreground(lipgloss.Color("#00FFFF")),
+
+		ActivityReading:   lipgloss.NewStyle().Foreground(lipgloss.Color("#38BDF8")),
+		ActivityWriting:   lipgloss.NewStyle().Foreground(lipgloss.Color("#FB923C")),
+		ActivityRunning:   lipgloss.NewStyle().Foreground(lipgloss.Color("#A78BFA")),
+		ActivitySearching: lipgloss.NewStyle().Foreground(lipgloss.Color("#34D399")),
+		ActivityBrowsing:  lipgloss.NewStyle().Foreground(lipgloss.Color("#22D3EE")),
+		ActivitySpawning:  lipgloss.NewStyle().Foreground(lipgloss.Color("#F472B6")),
+		ActivityThinking:  lipgloss.NewStyle().Foreground(dimWhite),
+		ActivityWaiting:   lipgloss.NewStyle().Foreground(yellow),
 	}
 }

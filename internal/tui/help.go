@@ -46,27 +46,21 @@ func (h *HelpOverlay) View() string {
 
 	bindings := []struct{ key, desc string }{
 		{"n", "New instance"},
-		{"d", "Toggle dangerous mode"},
-		{"Enter", "Attach (tiled if multi-select)"},
-		{"Ctrl+Enter", "Context menu"},
-		{"Ctrl+s", "Stop instance(s)"},
-		{"Ctrl+x", "Stop all idle instances"},
-		{"Ctrl+d", "Delete instance(s) (confirm)"},
+		{"m", "Toggle mode (safe/danger)"},
+		{"s", "Stop instance(s)"},
+		{"x", "Stop all idle instances"},
+		{"d", "Delete instance(s) (confirm)"},
+		{"g", "Group / ungroup"},
+		{"Enter", "Attach instance"},
 		{"Ctrl+r", "Resume instance"},
 		{"Space", "Toggle multi-select"},
 		{"Ctrl+a", "Select all"},
-		{"Ctrl+g", "Group selected instances"},
-		{"Ctrl+b", "Ungroup / break tiled view"},
 		{"/", "Filter instances"},
-		{"L", "Load profile"},
-		{"Ctrl+←/→", "Prev/next window"},
-		{"Ctrl+h/j/k/l", "Navigate panes"},
 		{"j/k ↑/↓", "Navigate"},
 		{"?", "Toggle this help"},
 		{"q", "Quit"},
 		{"", ""},
 		{"Left-click", "Attach instance"},
-		{"Right-click", "Context menu"},
 	}
 
 	var rows []string

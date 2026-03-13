@@ -5,25 +5,40 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/arlintdev/claudes/internal/claude"
 	"github.com/arlintdev/claudes/internal/instance"
 	"github.com/charmbracelet/lipgloss"
 )
 
-// ListView renders the instance table.
+// ListView renders the instance list as bordered cards.
 type ListView struct {
-	instances []*instance.Instance
-	cursor    int
-	width     int
-	height    int
-	theme     Theme
-	filter    string
-	activity  map[string]string // id → last activity line
-	selected  map[string]bool   // multi-select set (id → true)
+	instances      []*instance.Instance
+	cursor         int
+	width          int
+	height         int
+	scrollOffset   int // first visible row (in visual row space)
+	theme          Theme
+	filter         string
+	activity       map[string]string              // id → last activity line
+	activityStates map[string]*claude.ActivityState // id → enriched state
+	selected       map[string]bool                 // multi-select set (id → true)
 }
+
+const cardRows = 5 // top border (with title+status) + 3 content lines + bottom border
 
 // NewListView creates a new list view.
 func NewListView(theme Theme) ListView {
-	return ListView{theme: theme, activity: make(map[string]string), selected: make(map[string]bool)}
+	return ListView{
+		theme:          theme,
+		activity:       make(map[string]string),
+		activityStates: make(map[string]*claude.ActivityState),
+		selected:       make(map[string]bool),
+	}
+}
+
+// SetActivityState stores the enriched activity state for an instance.
+func (l *ListView) SetActivityState(id string, state *claude.ActivityState) {
+	l.activityStates[id] = state
 }
 
 // SetActivity stores the last activity line for an instance (keyed by ID).
@@ -44,6 +59,12 @@ func (l *ListView) SetFilter(f string) {
 
 // Sync updates the instance list and cleans stale selections.
 func (l *ListView) Sync(instances []*instance.Instance) {
+	// Remember which instance the cursor is on (by ID) so we can follow it after re-sort
+	var cursorID string
+	if l.cursor >= 0 && l.cursor < len(l.instances) {
+		cursorID = l.instances[l.cursor].ID
+	}
+
 	if l.filter != "" {
 		var filtered []*instance.Instance
 		for _, inst := range instances {
@@ -57,8 +78,13 @@ func (l *ListView) Sync(instances []*instance.Instance) {
 		l.instances = instances
 	}
 
-	// Sort: ungrouped first (by name), then grouped by group name, then by name within group
+	// Sort: active before stopped, then ungrouped before grouped, then by group, then by name
 	sort.SliceStable(l.instances, func(i, j int) bool {
+		ai := l.instances[i].Status != instance.StatusStopped && l.instances[i].Status != instance.StatusError
+		aj := l.instances[j].Status != instance.StatusStopped && l.instances[j].Status != instance.StatusError
+		if ai != aj {
+			return ai // active first
+		}
 		gi, gj := l.instances[i].GroupName, l.instances[j].GroupName
 		if (gi == "") != (gj == "") {
 			return gi == "" // ungrouped first
@@ -69,6 +95,15 @@ func (l *ListView) Sync(instances []*instance.Instance) {
 		return l.instances[i].Name < l.instances[j].Name
 	})
 
+	// Follow cursor by instance ID after re-sort
+	if cursorID != "" {
+		for i, inst := range l.instances {
+			if inst.ID == cursorID {
+				l.cursor = i
+				break
+			}
+		}
+	}
 	if l.cursor >= len(l.instances) && len(l.instances) > 0 {
 		l.cursor = len(l.instances) - 1
 	}
@@ -169,150 +204,351 @@ func (l *ListView) SetCursor(idx int) {
 	}
 }
 
-// InstanceAtRow maps a content row (0-based, relative to first data row after
-// the table header) to an instance index. Returns -1 if the row lands on a
-// group separator or is out of range. The table header itself is row -1 (not
-// passed here).
+// ScrollOffset returns the current scroll offset for mouse click adjustment.
+func (l *ListView) ScrollOffset() int {
+	return l.scrollOffset
+}
+
+// InstanceAtRow maps a visual row (0-based, relative to first card row,
+// already adjusted for scroll offset) to an instance index. Returns -1 if the
+// row lands on a group separator, card border, or is out of range.
 func (l *ListView) InstanceAtRow(row int) int {
 	if row < 0 || len(l.instances) == 0 {
 		return -1
 	}
-	// Walk through instances, accounting for separator rows inserted before
-	// the first member of each new group.
+	// Account for scroll offset
+	row += l.scrollOffset
+
 	currentRow := 0
 	lastGroup := ""
+	shownStoppedSep := false
 	for i, inst := range l.instances {
+		// Stopped separator
+		isStopped := inst.Status == instance.StatusStopped || inst.Status == instance.StatusError
+		if isStopped && !shownStoppedSep {
+			shownStoppedSep = true
+			if currentRow == row {
+				return -1
+			}
+			currentRow++
+		}
 		if inst.GroupName != "" && inst.GroupName != lastGroup {
-			// This row is a separator
+			// Group separator = 1 row
 			if currentRow == row {
 				return -1
 			}
 			currentRow++
 		}
 		lastGroup = inst.GroupName
-		if currentRow == row {
+		// Card = cardRows visual rows
+		if row >= currentRow && row < currentRow+cardRows {
 			return i
 		}
-		currentRow++
+		currentRow += cardRows
 	}
 	return -1
 }
 
-// View renders the 7-column table.
+// View renders the card-based instance list.
 func (l *ListView) View() string {
 	if len(l.instances) == 0 {
-		msg := l.theme.Muted.Render("  No instances. Press 'n' to create one.")
-		return msg
+		return l.theme.Muted.Render("  No instances. Press 'n' to create one.")
 	}
 
-	hasSelection := len(l.selected) > 0
-	checkW := 0
-	if hasSelection {
-		checkW = 4 // "[x] " or "[ ] "
+	// Card dimensions
+	cardW := l.width
+	if cardW < 20 {
+		cardW = 20
 	}
+	fullW := cardW - 2  // total card visual width (matches old lipgloss border output)
+	contentW := fullW - 4 // text area inside │ + padding
 
-	// Column widths
-	colName := 14
-	colStatus := 10
-	colMode := 8
-	colHost := 12
-	colCPU := 5
-	colMem := 7
-	colUp := 8
-	fixedCols := checkW + colName + colStatus + colMode + colHost + colCPU + colMem + colUp + 8 // 8 for spacing
-	remaining := l.width - fixedCols
-	colDir := max(remaining*30/100, 12)
-	colActivity := max(remaining-colDir-1, 10) // -1 for spacing
-
-	// Header (plain strings, no ANSI — fmt.Sprintf works fine)
-	checkHeader := ""
-	if hasSelection {
-		checkHeader = "    " // 4 chars to match checkbox column
-	}
-	header := fmt.Sprintf(" %s%-*s %-*s %-*s %-*s %-*s %*s %*s %-*s %-*s",
-		checkHeader,
-		colName, "NAME",
-		colStatus, "STATUS",
-		colMode, "MODE",
-		colHost, "HOST",
-		colDir, "DIR",
-		colCPU, "CPU",
-		colMem, "MEM",
-		colUp, "AGE",
-		colActivity, "ACTIVITY",
-	)
-	headerLine := l.theme.TableHeader.Width(l.width).Render(header)
-
-	// Rows
-	var rows []string
-	rows = append(rows, headerLine)
-
+	// Build all visual rows and track which row the cursor card starts at
+	var allRows []string
+	cursorStartRow := 0
 	lastGroup := ""
+	shownStoppedSep := false
+
 	for i, inst := range l.instances {
-		// Insert group separator before first instance of a new group
+		// Separator between active and stopped instances
+		isStopped := inst.Status == instance.StatusStopped || inst.Status == instance.StatusError
+		if isStopped && !shownStoppedSep {
+			shownStoppedSep = true
+			label := " ── stopped "
+			pad := cardW - lipgloss.Width(label) - 1
+			if pad < 0 {
+				pad = 0
+			}
+			sep := l.theme.Muted.Render(label + strings.Repeat("─", pad))
+			allRows = append(allRows, sep)
+		}
+
+		// Group separator
 		if inst.GroupName != "" && inst.GroupName != lastGroup {
 			label := " ── " + inst.GroupName + " "
-			pad := l.width - lipgloss.Width(label) - 1
+			pad := cardW - lipgloss.Width(label) - 1
 			if pad < 0 {
 				pad = 0
 			}
 			sep := l.theme.GroupSeparator.Render(label + strings.Repeat("─", pad))
-			rows = append(rows, sep)
+			allRows = append(allRows, sep)
 		}
 		lastGroup = inst.GroupName
 
-		status := l.styleStatus(inst.Status)
-		mode := l.styleMode(inst.Mode)
-		dir := truncate(inst.Dir, colDir)
-		act := truncate(l.activity[inst.ID], colActivity)
-		if act == "" {
-			act = "-"
+		if i == l.cursor {
+			cursorStartRow = len(allRows)
 		}
 
-		cpu := "-"
-		mem := "-"
-		if inst.Status != instance.StatusStopped && inst.PanePID != "" {
-			cpu = fmt.Sprintf("%.0f%%", inst.CPU)
-			mem = formatMem(inst.MemKB)
-		}
-
-		// Checkbox prefix (only when multi-select is active)
-		checkPrefix := ""
-		if hasSelection {
-			if l.selected[inst.ID] {
-				checkPrefix = "[x] "
-			} else {
-				checkPrefix = "[ ] "
-			}
-		}
-
-		hostLabel := truncate(inst.HostLabel(), colHost)
-
-		// Use padRight for styled strings (status, mode) since ANSI codes
-		// break fmt.Sprintf width calculations.
-		row := " " + checkPrefix + padRight(truncate(inst.Name, colName), colName) + " " +
-			padRight(status, colStatus) + " " +
-			padRight(mode, colMode) + " " +
-			padRight(hostLabel, colHost) + " " +
-			padRight(dir, colDir) + " " +
-			fmt.Sprintf("%*s", colCPU, cpu) + " " +
-			fmt.Sprintf("%*s", colMem, mem) + " " +
-			fmt.Sprintf("%-*s", colUp, inst.Uptime()) + " " +
-			padRight(act, colActivity)
-
-		// Three-tier styling: cursor > multi-selected > normal
+		// Pick border color
+		isCursor := i == l.cursor
+		isMultiSel := l.selected[inst.ID]
+		var borderStyle lipgloss.Style
 		switch {
-		case i == l.cursor:
-			row = l.theme.Selected.Width(l.width).Render(row)
-		case l.selected[inst.ID]:
-			row = l.theme.MultiSelected.Width(l.width).Render(row)
+		case isCursor:
+			borderStyle = l.theme.CardBorderSelected
+		case isMultiSel:
+			borderStyle = l.theme.CardBorderMultiSelected
 		default:
-			row = l.theme.TableRow.Width(l.width).Render(row)
+			borderStyle = l.theme.CardBorder
 		}
-		rows = append(rows, row)
+		bc := lipgloss.NewStyle().Foreground(borderStyle.GetForeground())
+		rc := bc
+
+		// Top border: ╭─ name ──── ● Status  5m ─╮
+		dot, statusText, age := l.statusInfo(inst)
+		nameStr := l.theme.Bold.Render(truncate(inst.Name, contentW/3))
+
+		leftPart := bc.Render("╭─ ") + nameStr + bc.Render(" ")
+		rightPart := dot + " " + statusText + "  " + l.theme.Muted.Render(age) + " " + rc.Render("─╮")
+		fillW := fullW - lipgloss.Width(leftPart) - lipgloss.Width(rightPart)
+		if fillW < 0 {
+			fillW = 0
+		}
+		topBorder := leftPart + bc.Render(strings.Repeat("─", fillW)) + rightPart
+
+		// Content lines (3 lines)
+		vBarL := bc.Render("│")
+		vBarR := rc.Render("│")
+		contentLines := []string{
+			l.cardLine2(inst, contentW),
+			l.cardLine3(inst, contentW),
+			l.cardLine4(inst, contentW),
+		}
+		var wrappedLines []string
+		for _, line := range contentLines {
+			padW := contentW - lipgloss.Width(line)
+			if padW < 0 {
+				padW = 0
+			}
+			inner := " " + line + strings.Repeat(" ", padW) + " "
+			wrappedLines = append(wrappedLines, vBarL+inner+vBarR)
+		}
+
+		// Bottom border
+		bottomBorder := bc.Render("╰"+strings.Repeat("─", fullW-2)) + rc.Render("╯")
+
+		// Assemble card
+		cardParts := []string{topBorder}
+		cardParts = append(cardParts, wrappedLines...)
+		cardParts = append(cardParts, bottomBorder)
+		card := strings.Join(cardParts, "\n")
+
+		// Prepend cursor indicator: ▐ for selected, space for others
+		if isCursor {
+			indicator := l.theme.CardBorderSelected.Render("▐")
+			cardLines := strings.Split(card, "\n")
+			for j := range cardLines {
+				cardLines[j] = indicator + cardLines[j]
+			}
+			card = strings.Join(cardLines, "\n")
+		} else {
+			cardLines := strings.Split(card, "\n")
+			for j := range cardLines {
+				cardLines[j] = " " + cardLines[j]
+			}
+			card = strings.Join(cardLines, "\n")
+		}
+
+		allRows = append(allRows, card)
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, rows...)
+	// Scroll offset: keep cursor card visible
+	l.adjustScroll(cursorStartRow, allRows)
+
+	// Slice visible rows
+	totalRows := countVisualRows(allRows)
+	if l.scrollOffset > totalRows-l.height {
+		l.scrollOffset = max(0, totalRows-l.height)
+	}
+
+	visible := sliceVisualRows(allRows, l.scrollOffset, l.height)
+	return strings.Join(visible, "\n")
+}
+
+// statusInfo returns the colored dot, status label, and age for an instance.
+func (l *ListView) statusInfo(inst *instance.Instance) (dot, status, age string) {
+	age = inst.Uptime()
+	state := l.activityStates[inst.ID]
+	switch {
+	case inst.Status == instance.StatusRunning || inst.Status == instance.StatusIdle:
+		if state != nil && state.Kind != claude.ActivityNone {
+			// Active activity from JSONL — show what Claude is doing
+			kindStyle := l.activityKindStyle(state.Kind)
+			dot = kindStyle.Render("●")
+			status = kindStyle.Render(state.Kind.String())
+		} else {
+			// No activity yet (new instance) or idle — show idle
+			dot = l.theme.StatusIdle.Render("●")
+			status = l.theme.StatusIdle.Render("idle")
+		}
+	default:
+		dot = l.statusDot(inst.Status)
+		status = l.styleStatus(inst.Status)
+	}
+	return
+}
+
+// cardLine2: mode + dir
+func (l *ListView) cardLine2(inst *instance.Instance, w int) string {
+	mode := l.styleMode(inst.Mode)
+	dir := truncate(inst.Dir, w-lipgloss.Width(mode)-3)
+	return mode + "  " + l.theme.Muted.Render(dir)
+}
+
+// cardLine3: activity sparkline
+func (l *ListView) cardLine3(inst *instance.Instance, w int) string {
+	state := l.activityStates[inst.ID]
+	if state == nil || len(state.Timestamps) == 0 {
+		return l.theme.Muted.Render(strings.Repeat("─", w-2))
+	}
+	spark := claude.RenderSparkline(state.Timestamps, claude.SparklineWindow, w-2)
+	// Color the sparkline with the activity kind color
+	kind := claude.ActivityThinking
+	if state.Kind != claude.ActivityNone {
+		kind = state.Kind
+	}
+	return l.activityKindStyle(kind).Render(spark)
+}
+
+// cardLine4: model + cost + tokens
+func (l *ListView) cardLine4(inst *instance.Instance, w int) string {
+	state := l.activityStates[inst.ID]
+	if state == nil || (state.Model == "" && state.CostUSD == 0 && state.TokensIn == 0) {
+		return l.theme.Muted.Render("-")
+	}
+
+	var parts []string
+	if state.Model != "" {
+		parts = append(parts, l.theme.Bold.Render(state.Model))
+	}
+	if state.CostUSD > 0 {
+		parts = append(parts, l.theme.Muted.Render(fmt.Sprintf("$%.2f", state.CostUSD)))
+	}
+	if state.TokensIn > 0 || state.TokensOut > 0 {
+		parts = append(parts, l.theme.Muted.Render(
+			formatTokens(state.TokensIn)+"↑ "+formatTokens(state.TokensOut)+"↓"))
+	}
+
+	line := strings.Join(parts, "  ")
+	return truncate(line, w-2)
+}
+
+// formatTokens formats a token count with k/M suffixes.
+func formatTokens(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+// activityKindStyle returns the style for a given activity kind.
+func (l *ListView) activityKindStyle(k claude.ActivityKind) lipgloss.Style {
+	switch k {
+	case claude.ActivityReading:
+		return l.theme.ActivityReading
+	case claude.ActivityWriting:
+		return l.theme.ActivityWriting
+	case claude.ActivityRunning:
+		return l.theme.ActivityRunning
+	case claude.ActivitySearching:
+		return l.theme.ActivitySearching
+	case claude.ActivityBrowsing:
+		return l.theme.ActivityBrowsing
+	case claude.ActivitySpawning:
+		return l.theme.ActivitySpawning
+	case claude.ActivityThinking:
+		return l.theme.ActivityThinking
+	case claude.ActivityWaiting:
+		return l.theme.ActivityWaiting
+	default:
+		return l.theme.StatusRunning
+	}
+}
+
+// statusDot returns a colored bullet for the status.
+func (l *ListView) statusDot(s instance.Status) string {
+	dot := "●"
+	switch s {
+	case instance.StatusRunning:
+		return l.theme.StatusRunning.Render(dot)
+	case instance.StatusIdle:
+		return l.theme.StatusIdle.Render(dot)
+	case instance.StatusError:
+		return l.theme.StatusError.Render(dot)
+	default:
+		return l.theme.StatusStopped.Render(dot)
+	}
+}
+
+// adjustScroll ensures the cursor card is visible within l.height.
+func (l *ListView) adjustScroll(cursorStartRow int, allRows []string) {
+	if l.height <= 0 {
+		return
+	}
+	// Convert cursorStartRow (index into allRows) to visual row offset
+	visualRow := 0
+	for i := 0; i < cursorStartRow && i < len(allRows); i++ {
+		visualRow += strings.Count(allRows[i], "\n") + 1
+	}
+	cursorEndRow := visualRow + cardRows
+
+	// Scroll up if cursor is above viewport
+	if visualRow < l.scrollOffset {
+		l.scrollOffset = visualRow
+	}
+	// Scroll down if cursor is below viewport
+	if cursorEndRow > l.scrollOffset+l.height {
+		l.scrollOffset = cursorEndRow - l.height
+	}
+}
+
+// countVisualRows counts total visual rows in the rendered output.
+func countVisualRows(rows []string) int {
+	total := 0
+	for _, r := range rows {
+		total += strings.Count(r, "\n") + 1
+	}
+	return total
+}
+
+// sliceVisualRows returns visible lines from offset up to limit lines.
+func sliceVisualRows(rows []string, offset, limit int) []string {
+	var allLines []string
+	for _, r := range rows {
+		allLines = append(allLines, strings.Split(r, "\n")...)
+	}
+	if offset >= len(allLines) {
+		return nil
+	}
+	end := offset + limit
+	if end > len(allLines) {
+		end = len(allLines)
+	}
+	return allLines[offset:end]
 }
 
 func (l *ListView) styleStatus(s instance.Status) string {
@@ -335,15 +571,6 @@ func (l *ListView) styleMode(m instance.Mode) string {
 	return l.theme.ModeSafe.Render(m.String())
 }
 
-// padRight pads a (possibly styled) string to targetWidth based on visible width.
-func padRight(s string, targetWidth int) string {
-	visible := lipgloss.Width(s)
-	if visible >= targetWidth {
-		return s
-	}
-	return s + strings.Repeat(" ", targetWidth-visible)
-}
-
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
@@ -359,16 +586,4 @@ func max(a, b int) int {
 		return a
 	}
 	return b
-}
-
-// formatMem formats RSS in KB to a human-readable string.
-func formatMem(kb uint64) string {
-	switch {
-	case kb >= 1024*1024:
-		return fmt.Sprintf("%.1fG", float64(kb)/(1024*1024))
-	case kb >= 1024:
-		return fmt.Sprintf("%.0fM", float64(kb)/1024)
-	default:
-		return fmt.Sprintf("%dK", kb)
-	}
 }

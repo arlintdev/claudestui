@@ -16,11 +16,9 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
 )
 
 // baseHeaderLines is the fixed portion: logo/info (3 lines) + tagline (1 line) + resource bar (1 line).
-// The shortcut bar adds 1+ lines depending on terminal width.
 const baseHeaderLines = 5
 
 // Messages
@@ -30,11 +28,11 @@ type errMsg struct{ err error }
 type updateAvailableMsg struct{ release *update.Release }
 type updateAppliedMsg struct{ err error }
 
-// tiledState tracks an active tiled view so we can break it apart later.
-type tiledState struct {
-	baseWindowID    string            // the window all panes were joined into
-	paneIDs         []string          // instance IDs in the tiled view
-	originalWindows map[string]string // id → original windowID (before join)
+// previewPaneState tracks an active tmux split preview.
+type previewPaneState struct {
+	paneID           string // tmux pane ID (e.g. "%5")
+	instanceID       string // instance being previewed
+	originalWindowID string // instance's window ID before join (now destroyed)
 }
 
 // Model is the root Bubble Tea model.
@@ -55,8 +53,9 @@ type Model struct {
 	shortcutRows int // number of lines the shortcut bar occupies
 	err          error
 	errAt        time.Time // when error was set, for flash bar timeout
-	tiled        *tiledState // active tiled view, if any
 	version      string     // current build version (e.g. "v0.5.0" or "dev")
+
+	previewPane *previewPaneState // active tmux split, nil when no instance attached
 }
 
 // New creates the root model.
@@ -79,9 +78,9 @@ func New(cfg config.Config, mgr *instance.Manager, tc *tmux.Client, launcher *cl
 
 // shortcutLabels are the key/desc pairs for the shortcut bar.
 var shortcutLabels = []struct{ key, desc string }{
-	{"n", "New"}, {"d", "Danger"}, {"^s", "Stop"}, {"^x", "Stop Idle"}, {"^d", "Delete"},
-	{"Enter", "Attach"}, {"^r", "Resume"}, {"Space", "Select"}, {"^a", "All"},
-	{"^g", "Group"}, {"^b", "Ungroup"}, {"t", "Tile"}, {"/", "Filter"}, {"L", "Profile"}, {"^h/l", "Prev/Next"}, {"^j/k", "Panes"}, {"^Space", "Back"}, {"?", "Help"}, {"q", "Quit"},
+	{"n", "New"}, {"m", "Mode"}, {"s", "Stop"}, {"x", "Stop Idle"}, {"d", "Delete"},
+	{"Enter", "Focus"}, {"^r", "Resume"}, {"Space", "Select"}, {"^a", "All"},
+	{"g", "Group"}, {"/", "Filter"}, {"^Space", "Back"}, {"?", "Help"}, {"q", "Quit"},
 }
 
 // calcShortcutRows computes how many lines the shortcut bar needs at current width.
@@ -112,13 +111,9 @@ func (m Model) calcShortcutRows() int {
 	return rows
 }
 
-// headerHeight returns the total header lines (info + shortcuts + resource bar).
+// headerHeight returns the total header lines (info + resource bar, shortcuts are at the bottom).
 func (m Model) headerHeight() int {
-	rows := m.shortcutRows
-	if rows < 1 {
-		rows = 1
-	}
-	return baseHeaderLines + rows
+	return baseHeaderLines
 }
 
 // Init starts the tick timer and checks for updates.
@@ -172,6 +167,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.launcher.Activity != nil {
 			for id, line := range m.launcher.Activity.All() {
 				m.list.SetActivity(id, line)
+			}
+			for id, state := range m.launcher.Activity.AllStates() {
+				m.list.SetActivityState(id, state)
 			}
 		}
 
@@ -231,6 +229,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch {
 	case key.Matches(msg, m.keys.Quit):
+		m.closePreview() // clean up tmux split before exit
 		if m.manager.Count() > 0 {
 			// Instances still running — keep the dashboard pane alive
 			// so the session isn't destroyed, then detach the client.
@@ -244,9 +243,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Up):
 		m.list.MoveUp()
+		if m.previewPane != nil {
+			m.syncPreview()
+		}
 
 	case key.Matches(msg, m.keys.Down):
 		m.list.MoveDown()
+		if m.previewPane != nil {
+			m.syncPreview()
+		}
 
 	case key.Matches(msg, m.keys.New):
 		m.dialog.OpenNew()
@@ -261,11 +266,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Group):
 		if ids := m.list.SelectedIDs(); len(ids) >= 2 {
 			m.dialog.OpenGroupName(ids)
-		}
-
-	case key.Matches(msg, m.keys.BreakTile):
-		if m.tiled != nil {
-			m.breakTiledView()
 		} else if ids := m.list.SelectedIDs(); ids != nil {
 			m.manager.ClearGroup(ids)
 			m.list.ClearSelected()
@@ -279,6 +279,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			for _, id := range ids {
 				inst := m.manager.Get(id)
 				if inst != nil && inst.Status != instance.StatusStopped {
+					// Close preview if we're stopping the previewed instance
+					if m.previewPane != nil && m.previewPane.instanceID == id {
+						m.closePreview()
+					}
 					if err := m.launcher.Kill(id); err != nil {
 						m.err = err
 						m.errAt = time.Now()
@@ -287,11 +291,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.list.ClearSelected()
 		} else if sel := m.list.Selected(); sel != nil && sel.Status != instance.StatusStopped {
+			// Close preview if we're stopping the previewed instance
+			if m.previewPane != nil && m.previewPane.instanceID == sel.ID {
+				m.closePreview()
+			}
 			if err := m.launcher.Kill(sel.ID); err != nil {
 				m.err = err
 				m.errAt = time.Now()
 			}
 		}
+		m.list.Sync(m.manager.All())
 
 	case key.Matches(msg, m.keys.StopIdle):
 		for _, inst := range m.manager.All() {
@@ -310,7 +319,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.dialog.OpenConfirmDelete(sel.ID, sel.Name)
 		}
 
-	case key.Matches(msg, m.keys.Danger):
+	case key.Matches(msg, m.keys.Mode):
 		if sel := m.list.Selected(); sel != nil {
 			if err := m.launcher.ToggleDangerous(sel.ID); err != nil {
 				m.err = err
@@ -325,52 +334,29 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.err = err
 					m.errAt = time.Now()
 				}
+				m.list.Sync(m.manager.All())
 			}
 		}
 
 	case key.Matches(msg, m.keys.Attach):
-		if ids := m.list.SelectedIDs(); ids != nil {
-			m.openTiledView(ids)
-			m.list.ClearSelected()
-		} else if sel := m.list.Selected(); sel != nil {
-			// Always attach to the single selected instance (even if grouped)
+		if sel := m.list.Selected(); sel != nil {
 			if sel.Status == instance.StatusStopped || sel.Status == instance.StatusError {
 				if err := m.launcher.Resume(sel.ID); err != nil {
 					m.err = err
 					m.errAt = time.Now()
 					return m, nil
 				}
-				// Re-fetch to get updated WindowID after resume
-				sel = m.manager.Get(sel.ID)
-			}
-			if sel != nil && sel.WindowID != "" {
-				_ = m.tmux.SelectWindow(sel.WindowID)
+				// Re-sync so the resumed instance moves to the active section
+				m.list.Sync(m.manager.All())
 			}
 		}
-
-	case key.Matches(msg, m.keys.TileGroup):
-		if sel := m.list.Selected(); sel != nil && sel.GroupName != "" {
-			members := m.manager.GroupMembers(sel.GroupName)
-			if len(members) > 0 {
-				m.openTiledView(members)
-			}
-		} else if ids := m.list.SelectedIDs(); ids != nil {
-			m.openTiledView(ids)
-			m.list.ClearSelected()
+		m.syncPreview()
+		if m.previewPane != nil {
+			_ = m.tmux.FocusPane(m.previewPane.paneID)
 		}
-
-	case msg.String() == "ctrl+enter":
-		if sel := m.list.Selected(); sel != nil {
-			m.dialog.OpenContextMenu(sel, m.width/2-12, m.headerHeight()+2+m.list.Cursor())
-		}
-
 
 	case key.Matches(msg, m.keys.Filter):
 		m.dialog.OpenFilter()
-
-	case key.Matches(msg, m.keys.Profile):
-		profiles, _ := config.ListProfiles(m.cfg.ProfileDir)
-		m.dialog.OpenProfile(profiles)
 	}
 
 	return m, nil
@@ -381,17 +367,14 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Ignore clicks when a dialog is open (except context menu — close it)
+	// Ignore clicks when a dialog is open
 	if m.dialog.Kind != DialogNone {
-		if m.dialog.Kind == DialogContextMenu {
-			m.dialog.Close()
-		}
 		return m, nil
 	}
 
-	// Header (variable lines) + resource bar (1) + table header (1) = offset.
-	// Data rows start after that.
-	contentRow := msg.Y - m.headerHeight() - 2 // -2: resource bar + table header
+	// Header (variable lines) + resource bar (1) = offset.
+	// Card rows start after that.
+	contentRow := msg.Y - m.headerHeight() - 1 // -1: resource bar
 	if contentRow < 0 {
 		return m, nil
 	}
@@ -420,12 +403,6 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 		if sel != nil && sel.WindowID != "" {
 			_ = m.tmux.SelectWindow(sel.WindowID)
-		}
-
-	case tea.MouseButtonRight:
-		sel := m.list.Selected()
-		if sel != nil {
-			m.dialog.OpenContextMenu(sel, msg.X, msg.Y)
 		}
 	}
 
@@ -524,23 +501,6 @@ func (m Model) handleDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case DialogProfile:
-		switch msg.String() {
-		case "esc":
-			m.dialog.Close()
-			return m, nil
-		case "enter":
-			profName := m.dialog.SelectedProfile()
-			m.dialog.Close()
-			if profName != "" {
-				m.loadProfile(profName)
-			}
-			return m, nil
-		default:
-			cmd := m.dialog.Update(msg)
-			return m, cmd
-		}
-
 	case DialogFilter:
 		switch msg.String() {
 		case "esc":
@@ -623,243 +583,96 @@ func (m Model) handleDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-	case DialogContextMenu:
-		switch msg.String() {
-		case "esc":
-			m.dialog.Close()
-			return m, nil
-		case "enter":
-			action := m.dialog.SelectedMenuAction()
-			target := m.dialog.Target()
-			m.dialog.Close()
-			return m.executeMenuAction(action, target)
-		default:
-			m.dialog.Update(msg)
-			return m, nil
-		}
 	}
 
 	return m, nil
 }
 
-// executeMenuAction dispatches a context menu action. The id param is an instance ID.
-func (m Model) executeMenuAction(action, id string) (tea.Model, tea.Cmd) {
-	switch action {
-	case "attach":
-		inst := m.manager.Get(id)
-		if inst == nil {
-			return m, nil
-		}
-		if inst.WindowID != "" {
-			_ = m.tmux.SelectWindow(inst.WindowID)
-		}
-	case "stop":
-		if err := m.launcher.Kill(id); err != nil {
-			m.err = err
-			m.errAt = time.Now()
-		}
-	case "delete":
-		inst := m.manager.Get(id)
-		displayName := id
-		if inst != nil {
-			displayName = inst.Name
-		}
-		m.dialog.OpenConfirmDelete(id, displayName)
-	case "resume":
-		if err := m.launcher.Resume(id); err != nil {
-			m.err = err
-			m.errAt = time.Now()
-		}
-	case "danger":
-		if err := m.launcher.ToggleDangerous(id); err != nil {
-			m.err = err
-			m.errAt = time.Now()
-		}
-	case "ungroup":
-		m.manager.ClearGroup([]string{id})
-	}
-	return m, nil
-}
-
-// openTiledView joins multiple instance windows into a single tiled pane layout.
-func (m *Model) openTiledView(ids []string) {
-	// Collect instances that have live windows; resume stopped ones first
-	var live []string
-	for _, id := range ids {
-		inst := m.manager.Get(id)
-		if inst == nil {
-			continue
-		}
-		// Already running with a window — use it directly
-		if inst.WindowID != "" && inst.Status != instance.StatusStopped && inst.Status != instance.StatusError {
-			live = append(live, id)
-			continue
-		}
-		// Stopped/error — try to resume
-		if inst.Status == instance.StatusStopped || inst.Status == instance.StatusError {
-			if err := m.launcher.Resume(id); err != nil {
-				m.err = fmt.Errorf("resume %s: %w", inst.Name, err)
-				m.errAt = time.Now()
-				continue
-			}
-			inst = m.manager.Get(id) // re-fetch after resume
-			if inst != nil && inst.WindowID != "" {
-				live = append(live, id)
-			}
-		}
-	}
-
-	if len(live) == 0 {
+// syncPreview updates the preview split to show the currently selected instance.
+// Skips stopped instances (keeps showing the last running one).
+// Uses swap-pane when a split already exists (instant), join-pane to create the first split.
+func (m *Model) syncPreview() {
+	sel := m.list.Selected()
+	if sel == nil || sel.WindowID == "" {
+		// Stopped or no selection — close preview to restore full dashboard
+		m.closePreview()
 		return
 	}
-
-	// Single instance: just switch to it
-	if len(live) == 1 {
-		inst := m.manager.Get(live[0])
-		if inst != nil {
-			_ = m.tmux.SelectWindow(inst.WindowID)
-		}
-		return
+	if m.previewPane != nil && sel.ID == m.previewPane.instanceID {
+		return // already showing
 	}
 
-	// Use the first instance's window as the base
-	baseInst := m.manager.Get(live[0])
-	if baseInst == nil {
-		return
-	}
-	baseWinID := baseInst.WindowID
-	origWindows := make(map[string]string, len(live))
-	origWindows[live[0]] = baseWinID
-
-	// Join remaining instances into the base window
-	for _, id := range live[1:] {
-		inst := m.manager.Get(id)
-		if inst == nil || inst.WindowID == "" {
-			continue
-		}
-		origWindows[id] = inst.WindowID
-		if err := m.tmux.JoinPane(inst.WindowID, baseWinID); err != nil {
-			m.err = err
-			m.errAt = time.Now()
-			continue
-		}
-		// After join-pane, the source window is destroyed;
-		// the instance now lives as a pane in baseWinID
-		inst.WindowID = baseWinID
-	}
-
-	// Apply tiled layout
-	_ = m.tmux.SelectLayoutTiled(baseWinID)
-
-	// Switch to the tiled view
-	_ = m.tmux.SelectWindow(baseWinID)
-
-	// Track tiled state for later break
-	m.tiled = &tiledState{
-		baseWindowID:    baseWinID,
-		paneIDs:         live,
-		originalWindows: origWindows,
-	}
-
-	// Tell the launcher to skip status refresh for tiled instances
-	m.launcher.TiledIDs = make(map[string]bool, len(live))
-	for _, id := range live {
-		m.launcher.TiledIDs[id] = true
-	}
-}
-
-// breakTiledView splits a tiled view back into individual windows.
-func (m *Model) breakTiledView() {
-	if m.tiled == nil {
-		return
-	}
-
-	panes, err := m.tmux.ListPanes(m.tiled.baseWindowID)
-	if err != nil || len(panes) <= 1 {
-		m.tiled = nil
-		m.launcher.TiledIDs = nil
-		return
-	}
-
-	// Break all panes except the first one (which stays in the base window)
-	// The first pane is the base instance — it keeps the original window
-	baseID := m.tiled.paneIDs[0]
-
-	// Build an ID queue for non-base panes
-	idIdx := 1 // start from second ID
-	for i := 1; i < len(panes) && idIdx < len(m.tiled.paneIDs); i++ {
-		instID := m.tiled.paneIDs[idIdx]
-		idIdx++
-
-		newWinID, err := m.tmux.BreakPane(panes[i].PaneID, instID)
+	if m.previewPane != nil {
+		// Split exists — swap (fast path)
+		err := m.tmux.SwapPane(m.previewPane.paneID, sel.WindowID)
 		if err != nil {
-			m.err = err
-			m.errAt = time.Now()
-			continue
+			return // silently skip on error — don't flash during navigation
 		}
-
-		// Update instance's window ID
-		inst := m.manager.Get(instID)
-		if inst != nil {
-			inst.WindowID = newWinID
-			m.manager.SaveInstance(instID)
+		oldInst := m.manager.Get(m.previewPane.instanceID)
+		if oldInst != nil {
+			oldInst.WindowID = sel.WindowID
+			m.manager.SaveInstance(m.previewPane.instanceID)
 		}
+		// Old instance gets its window back — clear previewing for it
+		m.launcher.PreviewingID = sel.ID
+		panes, _ := m.tmux.ListPanes(tmux.DashboardWindowName)
+		var newPaneID string
+		if len(panes) >= 2 {
+			newPaneID = panes[len(panes)-1].PaneID
+		}
+		m.previewPane = &previewPaneState{
+			paneID:           newPaneID,
+			instanceID:       sel.ID,
+			originalWindowID: sel.WindowID,
+		}
+	} else {
+		// No split yet — create one
+		paneID, err := m.tmux.JoinPaneRight(sel.WindowID, tmux.DashboardWindowName, 75)
+		if err != nil {
+			return
+		}
+		m.previewPane = &previewPaneState{
+			paneID:           paneID,
+			instanceID:       sel.ID,
+			originalWindowID: sel.WindowID,
+		}
+		m.launcher.PreviewingID = sel.ID
+		_ = m.tmux.FocusDashboardPane()
 	}
-
-	// The base instance keeps its original window ID
-	baseInst := m.manager.Get(baseID)
-	if baseInst != nil {
-		baseInst.WindowID = m.tiled.baseWindowID
-		m.manager.SaveInstance(baseID)
-	}
-
-	m.tiled = nil
-	m.launcher.TiledIDs = nil
 }
 
-func (m *Model) loadProfile(name string) {
-	path := config.ProfilePath(m.cfg.ProfileDir, name)
-	prof, err := config.LoadProfile(path)
+// closePreview breaks the previewed pane back into its own window.
+func (m *Model) closePreview() {
+	if m.previewPane == nil {
+		return
+	}
+	newWinID, err := m.tmux.BreakPane(m.previewPane.paneID, m.previewPane.instanceID)
 	if err != nil {
 		m.err = err
 		m.errAt = time.Now()
+		m.previewPane = nil
 		return
 	}
-	for _, pi := range prof.Instances {
-		_, err := m.launcher.Launch(claude.LaunchOpts{
-			Name:      pi.Name,
-			Dir:       pi.Dir,
-			Task:      pi.Task,
-			Dangerous: pi.Dangerous,
-		})
-		if err != nil {
-			m.err = err
-			m.errAt = time.Now()
-			return
-		}
+	inst := m.manager.Get(m.previewPane.instanceID)
+	if inst != nil {
+		inst.WindowID = newWinID
+		m.manager.SaveInstance(m.previewPane.instanceID)
 	}
+	m.launcher.PreviewingID = ""
+	m.previewPane = nil
 }
 
 func (m *Model) layout() {
 	// Compute how many lines the shortcut bar needs
 	m.shortcutRows = m.calcShortcutRows()
 
-	// header + footer (1) = reserved rows
-	contentH := m.height - m.headerHeight() - 1
+	// header + shortcuts (bottom) + footer (1) = reserved rows
+	contentH := m.height - m.headerHeight() - m.shortcutRows - 1
 
 	m.list.SetSize(m.width, contentH-1) // -1 for resource bar
 	m.dialog.SetWidth(m.width)
 	m.dialog.SetHeight(contentH)
 	m.help.SetSize(m.width, m.height)
-
-	// Side panel for new-instance form
-	if m.dialog.IsSidePanel() {
-		panelW := m.width * 45 / 100
-		listW := m.width - panelW
-		m.list.SetSize(listW, contentH-1)
-		m.dialog.SetWidth(panelW)
-		m.dialog.SetHeight(contentH)
-	}
 }
 
 // expandTilde replaces a leading ~ with the user's home directory.
@@ -879,62 +692,35 @@ var logoArt = []string{
 }
 var logoTagline = `~/made/by/arlint.dev`
 
-// renderHeader renders the compact header: logo + stats (3 lines) + shortcut bar (1 line).
+// renderHeader renders the header: logo + tagline (3 lines), then a stats line below.
 func (m Model) renderHeader() string {
-	total, running, idle, _, errored, _, _ := m.manager.Stats()
-
+	_, running, idle, _, errored, _, _ := m.manager.Stats()
 	cpuPct, memUsed, memTotal := getSysInfo()
 
-	// --- Left side: info lines (3 to match logo height) ---
-	info := []string{
-		m.theme.HeaderLabel.Render("Instances: ") +
-			m.theme.HeaderValue.Render(fmt.Sprintf("%d (%d running, %d idle, %d error)", total, running, idle, errored)),
-		m.theme.HeaderLabel.Render("CPU:       ") +
-			m.theme.HeaderValue.Render(fmt.Sprintf("%.0f%%", cpuPct)),
-		m.theme.HeaderLabel.Render("MEM:       ") +
-			m.theme.HeaderValue.Render(fmt.Sprintf("%s/%s", formatBytes(memUsed), formatBytes(memTotal))),
+	// Logo lines
+	var rows []string
+	for _, l := range logoArt {
+		rows = append(rows, " "+m.theme.Logo.Render(l))
 	}
 
-	// --- Right side: logo + tagline ---
-	var artLines []string
-	for _, l := range logoArt {
-		artLines = append(artLines, m.theme.Logo.Render(l))
-	}
-	// Right-align tagline under the logo
+	// Tagline
 	tag := logoTagline
 	if m.version != "" {
-		tag = logoTagline + " " + m.version
+		tag += " " + m.version
 	}
-	tagline := m.theme.Muted.Render(tag)
-	artLines = append(artLines, tagline)
+	rows = append(rows, " "+m.theme.Muted.Render(tag))
 
-	// Pad info to same height
-	for len(info) < len(artLines) {
-		info = append(info, "")
-	}
+	// Stats on a single line
+	stats := " " + m.theme.HeaderValue.Render(
+		fmt.Sprintf("%dR %dI %dE  cpu %.0f%%  mem %s/%s",
+			running, idle, errored, cpuPct, formatBytes(memUsed), formatBytes(memTotal)))
+	rows = append(rows, stats)
 
-	artW := 0
-	for _, al := range artLines {
-		if w := lipgloss.Width(al); w > artW {
-			artW = w
-		}
-	}
-	var headerRows []string
-	for i := 0; i < len(artLines); i++ {
-		left := " " + info[i]
-		leftW := lipgloss.Width(left)
-		lineArtW := lipgloss.Width(artLines[i])
-		// Right-align each art line to the logo width
-		pad := artW - lineArtW
-		artPadded := strings.Repeat(" ", pad) + artLines[i]
-		gap := m.width - leftW - artW - 1
-		if gap < 2 {
-			gap = 2
-		}
-		headerRows = append(headerRows, left+strings.Repeat(" ", gap)+artPadded)
-	}
+	return strings.Join(rows, "\n")
+}
 
-	// --- Shortcut bar: wrap to terminal width ---
+// renderShortcuts renders the shortcut bar, wrapped to terminal width.
+func (m Model) renderShortcuts() string {
 	var scParts []string
 	for _, s := range shortcutLabels {
 		scParts = append(scParts,
@@ -942,7 +728,6 @@ func (m Model) renderHeader() string {
 				m.theme.ShortcutDesc.Render(" "+s.desc))
 	}
 
-	// Wrap shortcuts into lines that fit the terminal width
 	var scLines []string
 	curLine := " "
 	curW := 1
@@ -970,9 +755,8 @@ func (m Model) renderHeader() string {
 	if curW > 1 {
 		scLines = append(scLines, curLine)
 	}
-	headerRows = append(headerRows, scLines...)
 
-	return strings.Join(headerRows, "\n")
+	return strings.Join(scLines, "\n")
 }
 
 // renderResourceBar renders the centered resource type bar (like k9s's "Pods(all)[137]").
@@ -1023,38 +807,28 @@ func (m Model) View() string {
 	header := m.renderHeader()
 
 	// Content area
-	contentH := m.height - m.headerHeight() - 1
+	contentH := m.height - m.headerHeight() - m.shortcutRows - 1
 	listView := m.list.View()
 
-	var content string
-	if m.dialog.IsSidePanel() {
-		panelW := m.width * 45 / 100
-		listW := m.width - panelW
-		resourceBar := m.renderResourceBar(listW)
-		leftCol := lipgloss.JoinVertical(lipgloss.Left, resourceBar, listView)
-		leftCol = lipgloss.NewStyle().Width(listW).Height(contentH).Render(leftCol)
-		rightCol := m.dialog.View()
-		content = lipgloss.JoinHorizontal(lipgloss.Top, leftCol, rightCol)
-	} else {
-		resourceBar := m.renderResourceBar(m.width)
-		content = lipgloss.JoinVertical(lipgloss.Left, resourceBar, listView)
-		content = lipgloss.NewStyle().Width(m.width).Height(contentH).Render(content)
+	resourceBar := m.renderResourceBar(m.width)
+	contentParts := []string{resourceBar, listView}
+	if m.dialog.IsContentDialog() {
+		contentParts = append(contentParts, m.dialog.View())
 	}
+	content := lipgloss.JoinVertical(lipgloss.Left, contentParts...)
+	content = lipgloss.NewStyle().Width(m.width).Height(contentH).Render(content)
+
+	// Shortcuts pinned to bottom
+	shortcuts := m.renderShortcuts()
 
 	// Footer
 	footer := m.renderFooter()
 
 	// Build base view
-	base := lipgloss.JoinVertical(lipgloss.Left, header, content, footer)
+	base := lipgloss.JoinVertical(lipgloss.Left, header, content, shortcuts, footer)
 
-	// Context menu: position at click location
-	if m.dialog.Kind == DialogContextMenu {
-		dialog := m.dialog.View()
-		return m.overlayAt(base, dialog, m.dialog.menuX, m.dialog.menuY)
-	}
-
-	// Modal overlays centered on screen (non-inline, non-side-panel dialogs)
-	if m.dialog.Kind != DialogNone && !m.dialog.IsInlineDialog() && !m.dialog.IsSidePanel() {
+	// Modal overlays centered on screen (non-inline, non-content, non-side-panel dialogs)
+	if m.dialog.Kind != DialogNone && !m.dialog.IsInlineDialog() && !m.dialog.IsContentDialog() && !m.dialog.IsSidePanel() {
 		dialog := m.dialog.View()
 		return m.overlay(base, dialog)
 	}
@@ -1065,49 +839,6 @@ func (m Model) View() string {
 	}
 
 	return base
-}
-
-// overlayAt places a dialog at specific coordinates, clamped to screen bounds.
-// Uses ANSI-aware truncation so styled base lines aren't corrupted.
-func (m Model) overlayAt(base, dialog string, x, y int) string {
-	dialogW := lipgloss.Width(dialog)
-	dialogH := lipgloss.Height(dialog)
-
-	// Clamp to screen
-	if x+dialogW > m.width {
-		x = m.width - dialogW
-	}
-	if y+dialogH > m.height {
-		y = m.height - dialogH
-	}
-	if x < 0 {
-		x = 0
-	}
-	if y < 0 {
-		y = 0
-	}
-
-	// Pad base to fill the full terminal height
-	baseLines := strings.Split(base, "\n")
-	for len(baseLines) < m.height {
-		baseLines = append(baseLines, strings.Repeat(" ", m.width))
-	}
-
-	dialogLines := strings.Split(dialog, "\n")
-
-	for i, dl := range dialogLines {
-		row := y + i
-		if row >= len(baseLines) {
-			break
-		}
-		line := baseLines[row]
-		// ANSI-aware: truncate to x visible chars for prefix
-		prefix := ansi.Truncate(line, x, "")
-		// ANSI-aware: drop the first (x + dialogW) visible chars for suffix
-		suffix := ansi.TruncateLeft(line, x+dialogW, "")
-		baseLines[row] = prefix + dl + suffix
-	}
-	return strings.Join(baseLines, "\n")
 }
 
 // overlay centers a dialog on top of the base view.

@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/arlintdev/claudes/internal/claude"
-	"github.com/arlintdev/claudes/internal/instance"
 	"github.com/arlintdev/claudes/internal/sshconfig"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -24,10 +23,8 @@ const (
 	DialogNew
 	DialogConfirmDelete
 	DialogConfirmBatchDelete
-	DialogProfile
 	DialogFilter
 	DialogSessionPicker
-	DialogContextMenu
 	DialogGroupName
 	DialogUpdate
 )
@@ -43,8 +40,6 @@ type Dialog struct {
 	focus      int               // active input index (0-2 = text, 3 = model)
 	target     string            // instance ID for confirm dialogs
 	targetName string            // display name for confirm dialogs
-	profiles   []string          // available profile names
-	profCur   int               // profile cursor
 	theme     Theme
 	width     int
 	height    int
@@ -73,12 +68,6 @@ type Dialog struct {
 	sessions   []claude.SessionInfo
 	sessionCur int
 
-	// Context menu
-	menuItems []menuItem
-	menuCur   int
-	menuX     int
-	menuY     int
-
 	// Group name dialog
 	groupNameInput textinput.Model
 	groupTargetIDs []string // IDs to group
@@ -90,12 +79,6 @@ type Dialog struct {
 	updateCur        int    // 0 = Update, 1 = Skip
 	updateDownloading bool  // true while downloading
 	updateErr        error  // download error
-}
-
-// menuItem represents a single context menu entry.
-type menuItem struct {
-	label  string
-	action string
 }
 
 // NewDialog creates a new dialog handler.
@@ -176,16 +159,14 @@ func (d *Dialog) IsInlineDialog() bool {
 	return d.Kind == DialogFilter || d.Kind == DialogConfirmDelete || d.Kind == DialogConfirmBatchDelete || d.Kind == DialogGroupName
 }
 
-// IsSidePanel returns true if the dialog renders as a side panel.
-func (d *Dialog) IsSidePanel() bool {
+// IsContentDialog returns true if the dialog renders below the list, not as an overlay.
+func (d *Dialog) IsContentDialog() bool {
 	return d.Kind == DialogNew
 }
 
-// OpenProfile opens the profile picker.
-func (d *Dialog) OpenProfile(profiles []string) {
-	d.Kind = DialogProfile
-	d.profiles = profiles
-	d.profCur = 0
+// IsSidePanel returns true if the dialog renders as a side panel.
+func (d *Dialog) IsSidePanel() bool {
+	return false
 }
 
 // OpenFilter opens the filter input.
@@ -201,39 +182,6 @@ func (d *Dialog) OpenSessionPicker(id string, sessions []claude.SessionInfo) {
 	d.target = id
 	d.sessions = sessions
 	d.sessionCur = 0
-}
-
-// OpenContextMenu opens a right-click context menu for an instance.
-func (d *Dialog) OpenContextMenu(inst *instance.Instance, x, y int) {
-	d.Kind = DialogContextMenu
-	d.target = inst.ID
-	d.targetName = inst.Name
-	d.menuCur = 0
-	d.menuX = x
-	d.menuY = y
-
-	var items []menuItem
-	switch inst.Status {
-	case instance.StatusStopped, instance.StatusError:
-		items = append(items, menuItem{"Resume", "resume"})
-	default:
-		items = append(items, menuItem{"Attach", "attach"})
-		items = append(items, menuItem{"Stop", "stop"})
-	}
-	items = append(items, menuItem{"Toggle Danger", "danger"})
-	items = append(items, menuItem{"Delete", "delete"})
-	if inst.GroupName != "" {
-		items = append(items, menuItem{"Ungroup", "ungroup"})
-	}
-	d.menuItems = items
-}
-
-// SelectedMenuAction returns the action string of the currently highlighted menu item.
-func (d *Dialog) SelectedMenuAction() string {
-	if d.menuCur >= 0 && d.menuCur < len(d.menuItems) {
-		return d.menuItems[d.menuCur].action
-	}
-	return ""
 }
 
 // OpenGroupName opens the group naming dialog.
@@ -279,7 +227,6 @@ func (d *Dialog) Close() {
 	d.batchTargets = nil
 	d.dirCompletions = nil
 	d.dirCompIdx = -1
-	d.menuItems = nil
 	d.groupTargetIDs = nil
 	d.updateURL = ""
 	d.updateDownloading = false
@@ -311,14 +258,6 @@ func (d *Dialog) FilterValue() string {
 	return d.filterInput.Value()
 }
 
-// SelectedProfile returns the name of the selected profile.
-func (d *Dialog) SelectedProfile() string {
-	if d.profCur >= 0 && d.profCur < len(d.profiles) {
-		return d.profiles[d.profCur]
-	}
-	return ""
-}
-
 // SelectedSession returns the selected session info, or nil.
 func (d *Dialog) SelectedSession() *claude.SessionInfo {
 	if d.sessionCur >= 0 && d.sessionCur < len(d.sessions) {
@@ -334,12 +273,8 @@ func (d *Dialog) Update(msg tea.Msg) tea.Cmd {
 		return d.updateNew(msg)
 	case DialogFilter:
 		return d.updateFilter(msg)
-	case DialogProfile:
-		return d.updateProfile(msg)
 	case DialogSessionPicker:
 		return d.updateSessionPicker(msg)
-	case DialogContextMenu:
-		return d.updateContextMenu(msg)
 	case DialogGroupName:
 		return d.updateGroupName(msg)
 	case DialogUpdate:
@@ -380,31 +315,35 @@ func (d *Dialog) updateNew(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 
-		// Model selector: left/right when focused on model field
+		// Model selector: left/right/space when focused on model field
 		if d.focus == 3 {
 			switch msg.String() {
 			case "left", "h":
 				if d.modelCur > 0 {
 					d.modelCur--
 				}
-			case "right", "l":
+			case "right", "l", " ":
 				if d.modelCur < len(modelChoices)-1 {
 					d.modelCur++
+				} else {
+					d.modelCur = 0 // wrap around on space
 				}
 			}
 			return nil
 		}
 
-		// Host selector: left/right when focused on host field
+		// Host selector: left/right/space when focused on host field
 		if d.focus == 4 {
 			switch msg.String() {
 			case "left", "h":
 				if d.hostCur > 0 {
 					d.hostCur--
 				}
-			case "right", "l":
+			case "right", "l", " ":
 				if d.hostCur < len(d.hostChoices)-1 {
 					d.hostCur++
+				} else {
+					d.hostCur = 0 // wrap around on space
 				}
 			}
 			return nil
@@ -417,17 +356,19 @@ func (d *Dialog) updateNew(msg tea.Msg) tea.Cmd {
 			return cmd
 		}
 
-		// Danger toggle: space to toggle
+		// Danger toggle: space/left/right to toggle
 		if d.focus == 6 {
-			if msg.String() == " " {
+			switch msg.String() {
+			case " ", "left", "right", "h", "l":
 				d.dangerous = !d.dangerous
 			}
 			return nil
 		}
 
-		// Resume toggle: space to toggle
+		// Resume toggle: space/left/right to toggle
 		if d.focus == 7 {
-			if msg.String() == " " {
+			switch msg.String() {
+			case " ", "left", "right", "h", "l":
 				d.resume = !d.resume
 			}
 			return nil
@@ -564,22 +505,6 @@ func (d *Dialog) updateFilter(msg tea.Msg) tea.Cmd {
 	return cmd
 }
 
-func (d *Dialog) updateProfile(msg tea.Msg) tea.Cmd {
-	if msg, ok := msg.(tea.KeyMsg); ok {
-		switch msg.String() {
-		case "j", "down":
-			if d.profCur < len(d.profiles)-1 {
-				d.profCur++
-			}
-		case "k", "up":
-			if d.profCur > 0 {
-				d.profCur--
-			}
-		}
-	}
-	return nil
-}
-
 func (d *Dialog) updateSessionPicker(msg tea.Msg) tea.Cmd {
 	if msg, ok := msg.(tea.KeyMsg); ok {
 		switch msg.String() {
@@ -602,22 +527,6 @@ func (d *Dialog) updateGroupName(msg tea.Msg) tea.Cmd {
 	return cmd
 }
 
-func (d *Dialog) updateContextMenu(msg tea.Msg) tea.Cmd {
-	if msg, ok := msg.(tea.KeyMsg); ok {
-		switch msg.String() {
-		case "j", "down":
-			if d.menuCur < len(d.menuItems)-1 {
-				d.menuCur++
-			}
-		case "k", "up":
-			if d.menuCur > 0 {
-				d.menuCur--
-			}
-		}
-	}
-	return nil
-}
-
 // SetWidth sets the dialog render width.
 func (d *Dialog) SetWidth(w int) {
 	d.width = w
@@ -635,16 +544,12 @@ func (d *Dialog) View() string {
 		return d.viewNew()
 	case DialogConfirmDelete:
 		return d.viewConfirmDelete()
-	case DialogProfile:
-		return d.viewProfile()
 	case DialogFilter:
 		return d.viewFilter()
 	case DialogConfirmBatchDelete:
 		return d.viewConfirmBatchDelete()
 	case DialogSessionPicker:
 		return d.viewSessionPicker()
-	case DialogContextMenu:
-		return d.viewContextMenu()
 	case DialogGroupName:
 		return d.viewGroupName()
 	case DialogUpdate:
@@ -655,149 +560,137 @@ func (d *Dialog) View() string {
 }
 
 func (d *Dialog) viewNew() string {
-	w := d.width
-	if w < 30 {
-		w = 30
+	cardW := d.width
+	if cardW < 30 {
+		cardW = 30
 	}
-	innerW := w - 4 // border + padding
+	innerW := cardW - 4 // border + padding
 
-	title := d.theme.Bold.Render("New Instance")
+	// Line 1: Name input
+	line1 := d.fieldLabel("Name", 0) + d.inputs[0].View()
 
-	// Field labels and inputs
-	type field struct {
-		label string
-		view  string
+	// Line 2: Dir input
+	line2 := d.fieldLabel("Dir", 1) + d.inputs[1].View()
+
+	// Line 3: Task input
+	line3 := d.fieldLabel("Task", 2) + d.inputs[2].View()
+
+	// Line 4: Model selector (own line)
+	line4 := d.fieldLabel("Model", 3) + d.renderSelector(3, modelLabels, d.modelCur)
+
+	// Line 5: Host selector (own line)
+	hostLabels := make([]string, len(d.hostChoices))
+	for i, h := range d.hostChoices {
+		if strings.HasPrefix(h, "ssh:") {
+			hostLabels[i] = h[4:]
+		} else {
+			hostLabels[i] = h
+		}
 	}
+	line5 := d.fieldLabel("Host", 4) + d.renderSelector(4, hostLabels, d.hostCur)
 
-	fields := []field{
-		{"Name", d.inputs[0].View()},
-		{"Dir", d.inputs[1].View()},
-		{"Task", d.inputs[2].View()},
+	// Toggles line: both on same line
+	line6 := d.renderToggle("danger", d.dangerous, 6) + "  " + d.renderToggle("resume", d.resume, 7)
+
+	// Context-sensitive hint line
+	var hint string
+	switch {
+	case d.focus < 3 || d.focus == 5: // text inputs
+		hint = d.theme.Muted.Render("Tab: next  Enter: create  Esc: cancel")
+	case d.focus == 3 || d.focus == 4: // selectors
+		hint = d.theme.Muted.Render("◀▶/Space: select  Tab: next  Enter: create")
+	case d.focus == 6 || d.focus == 7: // toggles
+		hint = d.theme.Muted.Render("Space/◀▶: toggle  Tab: next  Enter: create")
 	}
+	hintLine := "  " + hint
 
 	var rows []string
-	for i, f := range fields {
-		label := d.theme.Label.Render(f.label)
-		if d.focus == i {
-			label = d.theme.Bold.Render(f.label)
-		}
-		rows = append(rows, label)
-		rows = append(rows, f.view)
+	rows = append(rows, line1, line2, line3)
 
-		// Show directory completions below the Dir field
-		if i == 1 && d.focus == 1 && len(d.dirCompletions) > 0 {
-			for j, comp := range d.dirCompletions {
-				prefix := "  "
-				if j == d.dirCompIdx {
-					prefix = "▸ "
-				}
-				styled := d.theme.Muted.Render(prefix + comp)
-				rows = append(rows, styled)
+	// Dir completions
+	if d.focus == 1 && len(d.dirCompletions) > 0 {
+		for j, comp := range d.dirCompletions {
+			prefix := "  "
+			if j == d.dirCompIdx {
+				prefix = "▸ "
+			}
+			rows = append(rows, d.theme.Muted.Render("         "+prefix+comp))
+		}
+	}
+
+	rows = append(rows, line4, line5)
+
+	// Docker image (only when host is docker)
+	if d.hostChoices[d.hostCur] == "docker" {
+		imgLine := d.fieldLabel("Image", 5) + d.dockerImage.View()
+		rows = append(rows, imgLine)
+	}
+
+	rows = append(rows, line6, hintLine)
+
+	content := strings.Join(rows, "\n")
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(d.theme.CardBorderSelected.GetForeground()).
+		Width(innerW).
+		Padding(0, 1).
+		Render(content)
+}
+
+// renderSelector renders a selector field with arrows when focused.
+func (d *Dialog) renderSelector(focusIdx int, labels []string, cur int) string {
+	focused := d.focus == focusIdx
+	if focused {
+		var parts []string
+		for i, label := range labels {
+			if i == cur {
+				parts = append(parts, d.theme.Bold.Render("["+label+"]"))
+			} else {
+				parts = append(parts, d.theme.Muted.Render(" "+label+" "))
 			}
 		}
+		return "◀ " + strings.Join(parts, "") + " ▶"
+	}
+	// Unfocused: just show current value in muted
+	return d.theme.Muted.Render(labels[cur])
+}
 
-		rows = append(rows, "") // spacer
+// renderToggle renders a toggle with appropriate styling.
+func (d *Dialog) renderToggle(label string, on bool, focusIdx int) string {
+	focused := d.focus == focusIdx
+	check := "[ ]"
+	if on {
+		check = "[x]"
 	}
 
-	// Model selector
-	modelLabel := d.theme.Label.Render("Model")
-	if d.focus == 3 {
-		modelLabel = d.theme.Bold.Render("Model")
-	}
-	rows = append(rows, modelLabel)
-
-	var modelParts []string
-	for i, label := range modelLabels {
-		if i == d.modelCur {
-			modelParts = append(modelParts, d.theme.Bold.
-				Background(d.theme.Selected.GetBackground()).
-				Padding(0, 1).
-				Render(label))
-		} else {
-			modelParts = append(modelParts, d.theme.Muted.Padding(0, 1).Render(label))
+	if focused {
+		// Focused: accent color with arrows
+		accent := d.theme.Bold
+		if label == "danger" && on {
+			accent = d.theme.ModeDanger
 		}
+		return accent.Render("◀ " + check + " " + label + " ▶")
 	}
-	rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Center, modelParts...))
-	rows = append(rows, "")
+	// Unfocused
+	if on && label == "danger" {
+		return d.theme.ModeDanger.Render(check + " " + label)
+	}
+	if on {
+		return d.theme.Bold.Render(check + " " + label)
+	}
+	return d.theme.Muted.Render(check + " " + label)
+}
 
-	// Host selector
-	hostLabel := d.theme.Label.Render("Host")
-	if d.focus == 4 {
-		hostLabel = d.theme.Bold.Render("Host")
+// fieldLabel renders a field label with focus indicator.
+// Focused: "▸ Name:" in bold. Unfocused: "  Name:" in label color.
+func (d *Dialog) fieldLabel(name string, focusIdx int) string {
+	// Pad name to 6 chars for alignment (longest is "Model" / "Image")
+	padded := fmt.Sprintf("%-6s", name+":")
+	if d.focus == focusIdx {
+		return d.theme.Bold.Render("▸ " + padded)
 	}
-	rows = append(rows, hostLabel)
-
-	var hostParts []string
-	for i, choice := range d.hostChoices {
-		label := choice
-		if strings.HasPrefix(label, "ssh:") {
-			label = label[4:] // strip "ssh:" prefix for display
-		}
-		if i == d.hostCur {
-			hostParts = append(hostParts, d.theme.Bold.
-				Background(d.theme.Selected.GetBackground()).
-				Padding(0, 1).
-				Render(label))
-		} else {
-			hostParts = append(hostParts, d.theme.Muted.Padding(0, 1).Render(label))
-		}
-	}
-	rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Center, hostParts...))
-	rows = append(rows, "")
-
-	// Docker image input (only when host is "docker")
-	if d.hostChoices[d.hostCur] == "docker" {
-		imgLabel := d.theme.Label.Render("Image")
-		if d.focus == 5 {
-			imgLabel = d.theme.Bold.Render("Image")
-		}
-		rows = append(rows, imgLabel)
-		rows = append(rows, d.dockerImage.View())
-		rows = append(rows, "")
-	}
-
-	// Danger toggle
-	dangerLabel := d.theme.Label.Render("Mode")
-	if d.focus == 6 {
-		dangerLabel = d.theme.Bold.Render("Mode")
-	}
-	rows = append(rows, dangerLabel)
-	if d.dangerous {
-		rows = append(rows, d.theme.ModeDanger.Render("[x] DANGEROUS"))
-	} else {
-		rows = append(rows, d.theme.ModeSafe.Render("[ ] safe"))
-	}
-	rows = append(rows, "")
-
-	// Resume toggle
-	resumeLabel := d.theme.Label.Render("Resume")
-	if d.focus == 7 {
-		resumeLabel = d.theme.Bold.Render("Resume")
-	}
-	rows = append(rows, resumeLabel)
-	if d.resume {
-		rows = append(rows, d.theme.Bold.Render("[x] resume previous session"))
-	} else {
-		rows = append(rows, d.theme.Muted.Render("[ ] new session"))
-	}
-	rows = append(rows, "")
-
-	// Hints
-	hint := d.theme.Muted.Render("Tab next  Enter create  Esc cancel")
-	switch d.focus {
-	case 3, 4:
-		hint = d.theme.Muted.Render("←/→ select  Tab next  Enter create")
-	case 6, 7:
-		hint = d.theme.Muted.Render("Space toggle  Tab next  Enter create")
-	}
-	rows = append(rows, hint)
-
-	content := lipgloss.JoinVertical(lipgloss.Left, rows...)
-
-	return d.theme.SidePanel.
-		Width(innerW).
-		Height(d.height - 2).
-		Render(lipgloss.JoinVertical(lipgloss.Left, title, "", content))
+	return d.theme.Label.Render("  " + padded)
 }
 
 func (d *Dialog) viewGroupName() string {
@@ -817,33 +710,6 @@ func (d *Dialog) viewConfirmDelete() string {
 func (d *Dialog) viewConfirmBatchDelete() string {
 	return d.theme.ModeDanger.Render(fmt.Sprintf("Delete %d instances? ", len(d.batchTargets))) +
 		d.theme.Muted.Render("(y/enter) confirm  (n/esc) cancel")
-}
-
-func (d *Dialog) viewProfile() string {
-	title := d.theme.Bold.Render("Load Profile")
-	if len(d.profiles) == 0 {
-		msg := d.theme.Muted.Render("No profiles found in ~/.config/claudes/profiles/")
-		hint := d.theme.Muted.Render("Esc: close")
-		content := lipgloss.JoinVertical(lipgloss.Left, title, "", msg, "", hint)
-		return d.theme.Dialog.Width(50).Render(content)
-	}
-
-	var items []string
-	for i, p := range d.profiles {
-		prefix := "  "
-		if i == d.profCur {
-			prefix = "▸ "
-			items = append(items, d.theme.Bold.Render(prefix+p))
-		} else {
-			items = append(items, d.theme.Muted.Render(prefix+p))
-		}
-	}
-	hint := d.theme.Muted.Render("Enter: load  Esc: cancel")
-
-	content := lipgloss.JoinVertical(lipgloss.Left,
-		append([]string{title, ""}, append(items, "", hint)...)...,
-	)
-	return d.theme.Dialog.Width(40).Render(content)
 }
 
 func (d *Dialog) viewFilter() string {
@@ -894,30 +760,6 @@ func (d *Dialog) viewSessionPicker() string {
 		w = 60
 	}
 	return d.theme.Dialog.Width(w).Render(content)
-}
-
-func (d *Dialog) viewContextMenu() string {
-	name := d.targetName
-	if name == "" {
-		name = d.target
-	}
-	title := d.theme.Bold.Render(name)
-
-	var rows []string
-	for i, item := range d.menuItems {
-		prefix := "  "
-		if i == d.menuCur {
-			prefix = "▸ "
-			rows = append(rows, d.theme.Bold.Render(prefix+item.label))
-		} else {
-			rows = append(rows, d.theme.Muted.Render(prefix+item.label))
-		}
-	}
-
-	content := lipgloss.JoinVertical(lipgloss.Left,
-		append([]string{title, ""}, rows...)...,
-	)
-	return d.theme.Dialog.Width(24).Render(content)
 }
 
 func (d *Dialog) viewUpdate() string {
